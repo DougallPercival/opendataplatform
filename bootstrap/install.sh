@@ -19,13 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib/common.sh"
-
-# k3s installs its kubectl symlink at /usr/local/bin/kubectl. Some sudo
-# configs (a trimmed secure_path, common on hardened RHEL-family systems)
-# don't include /usr/local/bin even once the file's right there — which
-# silently breaks every bare `kubectl` call below regardless of how this
-# script was invoked. Make sure it's findable no matter what.
-export PATH="/usr/local/bin:${PATH}"
+# (common.sh above also fixes up PATH for /usr/local/bin/kubectl — see its comment)
 
 ROLE="control"
 REPO_URL=""

@@ -3,6 +3,14 @@
 
 set -euo pipefail
 
+# k3s installs its kubectl symlink at /usr/local/bin/kubectl. Some sudo
+# configs (a trimmed secure_path, common on hardened RHEL-family systems)
+# don't include /usr/local/bin even once the file's right there — which
+# silently breaks every bare kubectl/k3s call in scripts that source this
+# file, regardless of how they were invoked. Make sure it's findable no
+# matter what, once, here, rather than in every script separately.
+export PATH="/usr/local/bin:${PATH}"
+
 _c_red=$'\033[0;31m'; _c_yellow=$'\033[0;33m'; _c_green=$'\033[0;32m'; _c_blue=$'\033[0;34m'; _c_reset=$'\033[0m'
 
 info()    { echo "${_c_blue}==>${_c_reset} $*"; }
