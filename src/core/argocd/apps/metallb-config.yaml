@@ -1,0 +1,28 @@
+# The actual IP pool — a plain-manifests Application, not a Helm chart, because
+# this is pure config: your network's address range, not a piece of software.
+# Wave 1 so the MetalLB controller (wave 0) is already healthy before these
+# CRs get created.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metallb-config
+  namespace: argocd
+  labels:
+    platform.io/tier: core
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: __REPO_URL__
+    targetRevision: __REVISION__
+    path: src/core/argocd/manifests
+    directory:
+      include: "metallb-pool.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metallb-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

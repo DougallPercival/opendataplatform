@@ -1,0 +1,22 @@
+# TODO(you): replace with a real range from your network before this goes healthy.
+# Home: a slice of your LAN's subnet that your router will never hand out via
+# DHCP (check your router's DHCP range first, then carve out a few addresses
+# outside it — e.g. router hands out .100-.199, pick .240-.250).
+# Cloud: whatever your provider's internal/floating-IP range is for this VPC.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: default-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - 192.168.1.240-192.168.1.250   # TODO: your actual range
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: default
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - default-pool

@@ -1,0 +1,27 @@
+# Split from cert-manager.yaml on purpose: the ClusterIssuer/Certificate CRs
+# in manifests/cluster-issuer.yaml can't exist until cert-manager's own CRDs
+# are registered, so this is wave 1 — one wave after the controller (wave 0).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager-issuers
+  namespace: argocd
+  labels:
+    platform.io/tier: core
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: __REPO_URL__
+    targetRevision: __REVISION__
+    path: src/core/argocd/manifests
+    directory:
+      include: "cluster-issuer.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

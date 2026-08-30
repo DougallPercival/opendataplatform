@@ -1,0 +1,30 @@
+# The ONE thing bootstrap/install.sh applies by hand (with kubectl). Everything
+# else Argo CD manages from here — this Application watches src/core/argocd/apps/
+# and turns every Application manifest it finds there into a running piece of
+# core. install.sh substitutes __REPO_URL__ / __REVISION__ before applying this.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  labels:
+    platform.io/tier: core
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: __REPO_URL__
+    targetRevision: __REVISION__
+    path: src/core/argocd/apps
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

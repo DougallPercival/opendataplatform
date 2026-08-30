@@ -1,0 +1,32 @@
+# Prometheus + Grafana + Loki — listed as `module` in ARCHITECTURE.md §2's stack
+# table, not `core`, but scaffolded here in core/argocd since Phase 0's build
+# order explicitly includes it. Safe to leave un-synced (disable automated sync
+# below, or just delete this file) if you'd rather bring monitoring in later.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  labels:
+    platform.io/tier: core
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 66.3.1   # check for newer: https://github.com/prometheus-community/helm-charts/releases
+    helm:
+      values: |
+        grafana:
+          defaultDashboardsEnabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

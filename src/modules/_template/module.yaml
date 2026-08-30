@@ -1,0 +1,11 @@
+# Copy this folder to src/modules/<your-module-name>/ and fill in the blanks.
+# Reference example (ARCHITECTURE.md §3): notebook-jupyterhub.
+id: __MODULE_ID__
+displayName: __Display Name__
+icon: puzzle          # any icon name the ui-shell's icon set recognizes
+navPath: /__module_id__
+proxyTo: http://__service__.__namespace__.svc:80
+healthCheck: /healthz
+requires:
+  - auth              # list whatever this module needs registered first — e.g. auth, catalog
+optional: true

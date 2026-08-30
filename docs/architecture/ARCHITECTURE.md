@@ -27,6 +27,7 @@ Seven layers, foundation at the bottom. The shell sits on top of all of them as 
 **Legend:** `core` = install this first, it doesn't come out · `module` = opt in when a use case needs it
 
 ### Platform Shell — `core`
+
 Unified nav built from module manifests, catalog browser, pipeline & run status, deep-links into each module's own UI.
 
 | # | Layer | Description | Components |
@@ -63,6 +64,7 @@ All three do the same thing underneath: write (or commit) the module's manifest 
 The Add-ons page is thin by design: `platform-gateway` reads a static module index built from every `modules/*/module.yaml` at release time (so it can list modules that aren't installed yet, not just ones already running), overlays it with the live `PlatformModule` registrations it already watches for nav, and shows each module's state — Not installed / Installing / Healthy / Failed — by reading Argo CD's `Application` status. Clicking "Install" doesn't call Helm directly; it commits the manifest and lets Argo CD reconcile it, which is exactly what keeps the UI and the CLI from becoming two code paths that quietly drift apart. A module that declares `requires: [trino]` and isn't satisfied shows a disabled button with why, in the UI, and a clear error from the CLI — the dependency check lives once, at the API layer both doors call through.
 
 `modules/notebook-jupyterhub/module.yaml`
+
 ```yaml
 id: notebook-jupyterhub
 displayName: Notebooks
@@ -189,6 +191,7 @@ Most of this platform doesn't need backing up — it needs to be *reconstructibl
 Same five-step shape every time — ingest, land, transform, catalog, serve. What changes is the content, not the plumbing, which is the whole point of building this once. Written here as one person's workspace; in a team install each of these could just as easily be its own workspace with its own members.
 
 ### Stocks, news & Reddit mentions
+
 *Continuous ingestion, ad hoc exploration, a standing dashboard.*
 
 | Ingest | Land | Transform | Catalog | Serve |
@@ -196,6 +199,7 @@ Same five-step shape every time — ingest, land, transform, catalog, serve. Wha
 | Dagster job hits price API, news API, Reddit via PRAW on a schedule | Raw JSON/parquet → `minio://bronze/stocks/` | Polars job joins price + mentions, scores sentiment → Postgres/Iceberg | Tables + the sentiment-scorer function registered | Streamlit ticker dashboard, ad hoc SQL in Jupyter via Trino |
 
 ### In-season NFL betting ideas
+
 *Weekly cadence, a trained model, a "what should I look at" UI.*
 
 | Ingest | Land | Transform | Catalog | Serve |
@@ -205,6 +209,7 @@ Same five-step shape every time — ingest, land, transform, catalog, serve. Wha
 > **Reuse ready:** feature/elo functions live in `platform-sdk`, not in this pipeline — so March Madness below doesn't reinvent them.
 
 ### March Madness Kaggle contest
+
 *Bursty, deadline-driven, needs a fast turnaround from dataset to submission.*
 
 | Ingest | Land | Transform | Catalog | Serve |
@@ -217,7 +222,7 @@ Same five-step shape every time — ingest, land, transform, catalog, serve. Wha
 
 Shaped so someone cloning this later can install `core/` and stop, or keep going through `modules/` one at a time.
 
-```
+```text
 platform/
   core/
     gateway/              # module registry, nav aggregation, Add-ons page API

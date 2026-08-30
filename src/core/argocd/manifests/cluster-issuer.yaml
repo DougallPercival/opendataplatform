@@ -1,0 +1,39 @@
+# Self-signed by default — works with zero external dependencies, which matters
+# for a cluster that might be sitting behind NAT with no public DNS. Browsers
+# will warn on the untrusted cert; that's expected for an internal platform.
+#
+# TODO(you): if this cluster ever gets a real public domain, swap this for a
+# Let's Encrypt ClusterIssuer (DNS-01 challenge — HTTP-01 needs the cluster
+# reachable from the internet, which a homelab usually isn't). cert-manager's
+# own docs have the exact block for your DNS provider:
+# https://cert-manager.io/docs/configuration/acme/
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: self-signed
+spec:
+  selfSigned: {}
+---
+# A CA generated FROM the self-signed issuer above, so every other cert this
+# cluster issues shares one root — import that one root into your browser/OS
+# trust store once, instead of clicking through warnings per-service.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: platform-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: platform-ca
+  secretName: platform-ca-secret
+  issuerRef:
+    name: self-signed
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: platform-ca
+spec:
+  ca:
+    secretName: platform-ca-secret
