@@ -142,6 +142,37 @@ else
   info "No --repo-ssh-key given — skipping repo credential setup (fine if REPO_URL is public; see docs/known-issues.md if it isn't)."
 fi
 
+# ---- 2c. Sanity-check MetalLB's committed range against this host's subnet
+# metallb-pool.yaml's IP range has to be real, network-specific values (see
+# docs/known-issues.md — there's no way to derive "which slice of your subnet
+# is safe" automatically, so it's committed as a concrete range, not a
+# placeholder like __REPO_URL__). That means it's silently wrong if this repo
+# ever runs against different hardware/network than it was set up on — and
+# MetalLB's L2Advertisement mode doesn't just risk a conflict in that case, it
+# doesn't work AT ALL, since it ARPs on the local subnet. Warn loudly here
+# rather than let that surface later as "ingress-nginx's external IP never
+# leaves <pending>" with no obvious cause.
+if command -v ip >/dev/null 2>&1; then
+  POOL_FILE="${REPO_ROOT}/src/core/argocd/manifests/metallb-pool.yaml"
+  if [[ -f "$POOL_FILE" ]]; then
+    POOL_FIRST_IP="$(grep -m1 -oE '([0-9]{1,3}\.){3}[0-9]{1,3}-' "$POOL_FILE" | head -1 | sed 's/-$//')"
+    HOST_CIDR="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | head -1)"
+    if [[ -n "$POOL_FIRST_IP" && -n "$HOST_CIDR" ]]; then
+      POOL_PREFIX="$(cut -d. -f1-3 <<< "$POOL_FIRST_IP")"
+      HOST_PREFIX="$(cut -d. -f1-3 <<< "$HOST_CIDR")"
+      if [[ "$POOL_PREFIX" != "$HOST_PREFIX" ]]; then
+        warn "metallb-pool.yaml's IP range (${POOL_PREFIX}.x) doesn't match this host's detected subnet (${HOST_CIDR}, ${HOST_PREFIX}.x)."
+        warn "MetalLB needs its pool on the SAME subnet as this host to actually work — a mismatch here usually means"
+        warn "this repo was set up on different hardware/network than it's running on now. Update"
+        warn "src/core/argocd/manifests/metallb-pool.yaml before relying on ingress-nginx getting a working external IP."
+        warn "Continuing anyway — this is a warning, not a blocker."
+      else
+        info "metallb-pool.yaml's IP range matches this host's subnet (${HOST_PREFIX}.x)."
+      fi
+    fi
+  fi
+fi
+
 # ---- 3. Hand Argo CD the app-of-apps ------------------------------------
 info "Applying the root Application (src/core/argocd/apps)..."
 sed \

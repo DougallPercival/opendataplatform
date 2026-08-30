@@ -6,6 +6,31 @@ not design. First target: RHEL/Rocky/AlmaLinux 9. Add to this as new hosts turn 
 
 ## Still on you — host-level decisions a script shouldn't make for you
 
+### MetalLB's IP pool is network-specific — update it on any new host/network
+
+`src/core/argocd/manifests/metallb-pool.yaml` is committed with a real, concrete IP range
+(currently `192.168.4.240-192.168.4.250`, homelab-dev's eero LAN), not a placeholder. Unlike
+`REPO_URL`/`REVISION`, there's no way for `install.sh` to derive "which slice of this network is
+safe to hand out" on its own — that always needs a human check (see the ping-loop approach below).
+
+This means the committed value is only correct for the network it was set up on. Run this repo
+against different hardware or a different network — new server, router swap, a cloud VM — and it
+silently carries over the old range. MetalLB's `L2Advertisement` mode ARPs on the local subnet, so
+a mismatched pool doesn't just risk a conflict, it doesn't work at all: ingress-nginx's external IP
+just sits on `<pending>` forever, with nothing pointing at "wrong subnet" as the cause.
+
+`install.sh` now checks this automatically — it compares the pool's subnet against the host's
+detected subnet and warns (doesn't block) on a mismatch. If you see that warning, or you're setting
+this up fresh on new hardware, find a safe range with a quick reachability check rather than
+guessing at your router's DHCP boundary:
+
+```bash
+for i in 240 241 242 243 244 245; do ping -c1 -W1 192.168.X.$i >/dev/null && echo "192.168.X.$i is IN USE" || echo "192.168.X.$i looks free"; done
+```
+
+(swap `192.168.X` for your actual subnet — check any device's own IP to find it, no router login
+needed). Update `metallb-pool.yaml` with whatever range comes back clean.
+
 ### firewalld
 
 **What happened:** k3s installed and the `k3s` service ran, but the node sat `NotReady`

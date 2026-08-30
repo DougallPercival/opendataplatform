@@ -17,8 +17,14 @@ metadata:
   namespace: keycloak
 spec:
   instances: 1
+  # Not reachable yet either way — ingress.enabled is false below, so this
+  # hostname isn't blocking anything right now. Once platform-gateway exists
+  # and this gets a real Ingress, resolve it with an /etc/hosts entry on
+  # whatever devices need it (decision 2026-08-30: no local DNS server, so
+  # /etc/hosts per-device rather than a router-level A record) pointed at
+  # whatever IP ingress-nginx picks up from metallb-pool.yaml.
   hostname:
-    hostname: keycloak.platform.local   # TODO: your real hostname once ingress-nginx + cert-manager are up
+    hostname: keycloak.platform.local
   http:
     tlsSecret: keycloak-tls
   db:
