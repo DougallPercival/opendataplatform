@@ -176,6 +176,28 @@ your shell's `$PATH` — which is why this same `/usr/local/bin` gap bites again
 command. Either type the full path (`sudo /usr/local/bin/kubectl ...`), or fix it once at the host
 level via `sudo visudo` — find the `Defaults secure_path = ...` line and add `/usr/local/bin` to it.
 
+### node-exporter's default port (9100) can collide with a pre-existing host exporter
+
+**What happened:** `monitoring.yaml`'s `kube-prometheus-stack` bundles `prometheus-node-exporter`,
+which runs with `hostNetwork: true` — it binds directly to the host's port 9100, not just a
+container port. On a box already running its own native `node_exporter` (feeding a separate,
+pre-existing Prometheus setup), that's an immediate, permanent `CrashLoopBackOff`:
+`listen tcp 0.0.0.0:9100: bind: address already in use`.
+
+**Status:** worked around, not a script fix — this is a legitimate per-host conflict, not a bug.
+`monitoring.yaml` now overrides the chart's `prometheus-node-exporter.service.port`/`targetPort` to
+`9101` instead of touching whatever's already on `9100`. Confirmed against the chart's own
+`ServiceMonitor` template that Prometheus discovers this port by name (`metrics`), not the number,
+so scraping keeps working automatically with no other change needed. If you hit the same collision
+on a different host, check what's already bound first (`ss -ltnp | grep 9100`) before assuming which
+side should move.
+
+**Reminder if you change a synced Application's Helm values:** Argo CD only sees what's pushed to
+git — running `kubectl annotate ... refresh=hard` (or any resync/restart) *before* the commit
+actually reaches the branch it's tracking just re-applies the same old config. If a fix doesn't seem
+to take effect, check the live resource directly (e.g. `kubectl get svc ... -o jsonpath='{.spec.ports}'`)
+to confirm what's actually deployed before assuming the fix itself is wrong.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a
@@ -191,3 +213,10 @@ level via `sudo visudo` — find the `Defaults secure_path = ...` line and add `
 - **`bootstrap/install.sh`'s node-Ready wait is now bounded (3 minutes) and checks `kubectl`
   actually resolves before entering the loop**, instead of being able to spin silently forever on
   a masked failure the way it did above.
+- **`bootstrap/install.sh` now installs and enables `iscsid`** (Longhorn's host prerequisite —
+  `iscsi-initiator-utils` on dnf, `open-iscsi` on apt), best-effort and non-fatal, skippable with
+  `--skip-iscsi`. Deliberately leaves `iscsi.service` alone (a separate unit that does unrelated
+  boot-time node auto-discovery — enabling it can add 2-3 minutes to every boot for no benefit
+  here); verified the `iscsid`-vs-`iscsi.service` distinction against
+  [Longhorn's own docs](https://longhorn.io/kb/troubleshooting-open-iscsi-on-rhel/) rather than
+  assuming.

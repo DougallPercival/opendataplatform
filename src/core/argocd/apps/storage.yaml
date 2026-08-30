@@ -1,9 +1,12 @@
 # Longhorn — replicated block storage across nodes (ARCHITECTURE.md §6/§8).
 # Prerequisite on each node that will host storage: open-iscsi (or iscsi-initiator-utils)
-# installed and the iscsid service running — bootstrap/install.sh warns if it's
-# missing but doesn't install it for you (it's a host package, not a k8s resource).
+# installed and the iscsid service running — bootstrap/install.sh now installs and
+# enables this automatically (best-effort, non-fatal; --skip-iscsi to opt out).
 # Single-node testing: fine to leave this app un-synced and rely on k3s's built-in
-# local-path-provisioner instead until you actually have 2+ storage-capable nodes.
+# local-path-provisioner instead until you actually have 2+ storage-capable nodes —
+# disable automated sync in that case rather than fighting a host prerequisite you
+# don't need yet: `kubectl -n argocd patch application storage-longhorn --type merge
+# -p '{"spec":{"syncPolicy":{"automated":null}}}'`
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

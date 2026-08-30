@@ -27,6 +27,7 @@ REVISION=""
 ARGOCD_VERSION="stable"
 SKIP_K3S=false
 REPO_SSH_KEY=""
+SKIP_ISCSI=false
 
 usage() {
   cat <<EOF
@@ -43,6 +44,11 @@ Usage: bootstrap/install.sh [options]
                         every install (it lives in the argocd namespace, so a teardown that
                         deletes that namespace takes it with it — pass this again on re-install
                         rather than repeating docs/known-issues.md's manual steps).
+  --skip-iscsi          Don't touch host iSCSI packages/services (Longhorn's prerequisite) —
+                        useful on a managed/cloud node where you don't want this script running
+                        dnf/apt as root on your behalf, or if you're deliberately staying on
+                        local-path-provisioner for now (single-node testing doesn't need this
+                        at all — see docs/known-issues.md).
   -h, --help            Show this help
 
 Phase 0 gets you: k3s, Argo CD, and the app-of-apps handoff. MetalLB's IP pool and the ingress/
@@ -58,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --role) ROLE="$2"; shift 2 ;;
     --skip-k3s) SKIP_K3S=true; shift ;;
     --repo-ssh-key) REPO_SSH_KEY="$2"; shift 2 ;;
+    --skip-iscsi) SKIP_ISCSI=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
   esac
@@ -71,6 +78,39 @@ REPO_ROOT="$(repo_root)"
 info "Repo:     $REPO_URL"
 info "Revision: $REVISION"
 info "Role:     $ROLE"
+
+# ---- 0. iSCSI (Longhorn's host prerequisite) ----------------------------
+# Best-effort, non-fatal: Longhorn (storage-longhorn Application) needs iscsid
+# running on any node that'll host its volumes, or its pods just never go
+# healthy with no obvious host-level cause. Not needed at all for single-node
+# testing on k3s's built-in local-path-provisioner (see docs/known-issues.md)
+# — this only matters once storage-longhorn's automated sync is actually
+# turned back on. Package name and the iscsid-vs-iscsi.service distinction
+# verified against Longhorn's own troubleshooting docs, not assumed:
+# https://longhorn.io/kb/troubleshooting-open-iscsi-on-rhel/ — iscsid is the
+# daemon Longhorn actually talks to; iscsi.service does unrelated boot-time
+# node auto-discovery and is deliberately left alone/disabled.
+if [[ "$SKIP_ISCSI" == true ]]; then
+  info "Skipping iSCSI setup (--skip-iscsi)."
+elif systemctl is-active --quiet iscsid 2>/dev/null; then
+  info "iscsid already running — leaving it as-is."
+elif command -v dnf >/dev/null 2>&1; then
+  info "Installing iscsi-initiator-utils and enabling iscsid..."
+  if dnf install -y iscsi-initiator-utils && systemctl enable --now iscsid; then
+    success "iscsid is up."
+  else
+    warn "iSCSI setup failed — not fatal, but storage-longhorn won't go healthy until this is sorted. See docs/known-issues.md."
+  fi
+elif command -v apt-get >/dev/null 2>&1; then
+  info "Installing open-iscsi and enabling iscsid..."
+  if apt-get install -y open-iscsi && systemctl enable --now iscsid; then
+    success "iscsid is up."
+  else
+    warn "iSCSI setup failed — not fatal, but storage-longhorn won't go healthy until this is sorted. See docs/known-issues.md."
+  fi
+else
+  warn "No dnf or apt-get found — skipping iSCSI setup. Install open-iscsi/iscsi-initiator-utils by hand if you plan to use Longhorn."
+fi
 
 # ---- 1. k3s -----------------------------------------------------------
 if [[ "$SKIP_K3S" == true ]]; then
