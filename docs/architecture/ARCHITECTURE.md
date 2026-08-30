@@ -248,6 +248,25 @@ platform/
   docs/
 ```
 
+### Branching & CI
+
+Three long-lived branches, each a step of promotion: `main` (stable, what you'd stand a deployment up from) ← `test` (integration-validated, candidate for `main`) ← `dev` (where feature branches land first). Everything else is a short-lived `feature/<name>` (or `fix/<name>`) branch cut from `dev`, merged back into `dev` via PR, then never touched again.
+
+Promotion between the three long-lived branches is also a PR, never a direct push — `dev → test` and `test → main` — even solo, so every promotion gets a diff and a CI run instead of trusting memory. `main`, `test`, and `dev` are all protected: no direct pushes, PR required, CI must pass before merge. This also happens to line up with how the platform itself is deployed (§3, §6) — if you ever run separate dev/test/prod clusters, Argo CD can point each one at the matching branch, so branch promotion and environment promotion become the same motion instead of two.
+
+CI (GitHub Actions, `.github/workflows/ci.yml`) runs on every PR into `dev`/`test`/`main`, path-filtered so it only lints what actually changed and stays green while most of the repo is still empty:
+
+| Changed paths | Check |
+|---|---|
+| `**/*.md` | markdownlint |
+| `**/*.yml`, `**/*.yaml` | yamllint |
+| `src/**/*.py`, `platform-sdk/**`, `platform-cli/**` | ruff + pytest |
+| `**/*.sh` | shellcheck |
+| `**/Dockerfile*` | hadolint |
+| `charts/**`, `**/Chart.yaml` | `helm lint` |
+
+Each check is a no-op until there's something of that kind to lint, so the pipeline doesn't start red on a docs-only repo — it grows teeth as `src/`, `charts/`, and `bootstrap/*.sh` fill in.
+
 ---
 
 ## 11. Build order
