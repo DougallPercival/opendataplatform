@@ -28,3 +28,10 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      # CNPG's own CRDs (clusters.postgresql.cnpg.io, poolers.postgresql.cnpg.io)
+      # are large enough that plain client-side apply's last-applied-configuration
+      # annotation blows past Kubernetes' 256KiB annotation limit — same failure
+      # class as Argo CD's own applicationsets.argoproj.io CRD (see bootstrap/
+      # install.sh and docs/known-issues.md). Server-side apply sidesteps the
+      # annotation entirely.
+      - ServerSideApply=true
