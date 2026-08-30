@@ -11,9 +11,11 @@ right order and wait for the previous wave to go healthy first:
 
 | Wave | Apps | Why this order |
 |---|---|---|
-| 0 | cert-manager, sealed-secrets, metallb, storage | Foundational, no cross-dependencies |
-| 1 | cert-manager-issuers, metallb-config, ingress-nginx, keycloak-operator | Each needs its wave-0 counterpart's CRDs/controller healthy first — issuers need cert-manager's CRDs, the IP pool needs MetalLB's controller, ingress needs MetalLB for a LoadBalancer IP |
-| 2 | keycloak-instance, monitoring | Keycloak instance needs its operator's CRDs registered first |
+| 0 | cert-manager, sealed-secrets, metallb, storage, postgres-operator | Foundational, no cross-dependencies |
+| 1 | cert-manager-issuers, metallb-config, ingress-nginx, keycloak-operator, postgres-cluster | Each needs its wave-0 counterpart's CRDs/controller healthy first — issuers need cert-manager's CRDs, the IP pool needs MetalLB's controller, ingress needs MetalLB for a LoadBalancer IP, the Postgres Cluster CR needs the operator's CRDs |
+| 2 | keycloak-instance, monitoring | Needs its own operator's CRDs (wave 1) AND postgres-cluster (also wave 1) to exist first |
+
+`postgres-operator`/`postgres-cluster` (CloudNativePG) are Phase 1 in ARCHITECTURE.md's build order, pulled forward into Phase 0 here because Keycloak needs a database before Phase 1 would otherwise provide one — see the comments in `manifests/postgres-cluster.yaml` and `keycloak-instance.yaml` for the reasoning and what's still deferred (WAL-archive backups to MinIO, once MinIO exists).
 
 `manifests/` — plain Kubernetes resources (not Helm releases) that some of the `apps/` Applications
 point at directly: the MetalLB IP pool, the cert-manager ClusterIssuer, the Keycloak CR. These are

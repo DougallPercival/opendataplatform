@@ -1,0 +1,35 @@
+# Single instance for now — fine for homelab bring-up and for what Keycloak
+# needs on day one. Bump `instances: 3` once this matters enough to want HA
+# (odd number, same reasoning as the k3s control-plane note in ARCHITECTURE.md
+# §12's DR discussion).
+#
+# storage.storageClass is left unset on purpose: CNPG will use the cluster's
+# default StorageClass, which is Longhorn once src/core/argocd/apps/storage.yaml
+# is healthy, or k3s's built-in local-path-provisioner if you're testing
+# single-node without Longhorn synced. Set it explicitly if you want to be sure.
+#
+# bootstrap.initdb has NO secret: field on purpose — that's not an oversight.
+# Leaving it out is the documented way to have CNPG generate the app user and
+# a secure random password itself, into an auto-created Secret named
+# "platform-postgres-app" (the "<cluster-name>-app" convention — confirmed
+# against CloudNativePG's own docs, not assumed). That sidesteps needing
+# sealed-secrets/kubeseal just to bootstrap this one credential.
+#
+# Not wired up yet: WAL archiving to MinIO (ARCHITECTURE.md §8's actual backup
+# story). MinIO doesn't exist in this repo yet either — Phase 1. Revisit once
+# it does; a single-instance, unbacked-up Postgres is fine for getting Keycloak
+# running, not fine to leave that way long-term.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: platform-postgres
+  namespace: postgres
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.4-system-trixie   # confirmed current default for CNPG 1.30 — check for newer before a real install
+  storage:
+    size: 10Gi
+  bootstrap:
+    initdb:
+      database: keycloak
+      owner: keycloak

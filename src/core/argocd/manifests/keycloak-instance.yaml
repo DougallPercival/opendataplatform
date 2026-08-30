@@ -1,13 +1,15 @@
-# TODO(you): Keycloak needs a Postgres database, but Postgres itself is a
-# Phase 1 (Storage) piece in ARCHITECTURE.md's build order, while Keycloak is
-# Phase 0 (Infrastructure). That's a real sequencing wrinkle in the design,
-# not solved here — pick one for now:
-#   (a) bring Phase 1's CloudNativePG forward and point Keycloak at a
-#       dedicated `keycloak` database/role on it, or
-#   (b) let Keycloak run in dev mode against its bundled embedded store
-#       first, and switch the `db:` block below once Postgres exists.
-# Either way, this CR won't reconcile healthy until `db.host` /
-# `db.usernameSecret` / `db.passwordSecret` point at something real.
+# The Phase 0/Phase 1 sequencing gap noted here previously is resolved:
+# postgres-operator + postgres-cluster (wave 0/1, this same argocd/ tree)
+# pull CloudNativePG forward instead of leaving Keycloak on a TODO. db.host
+# is CNPG's standard "<cluster-name>-rw" read-write Service, and the
+# username/passwordSecret below is the Secret CNPG auto-generates from
+# postgres-cluster.yaml's bootstrap.initdb — nothing to hand-create.
+#
+# Ordering note: this CR is wave 2, postgres-cluster is wave 1, so Postgres
+# is applied first — but Argo CD's wave gate doesn't deeply health-check a
+# Cluster CR, so "applied" isn't the same as "finished bootstrapping." If
+# this shows Degraded right after a fresh install because Postgres is still
+# initializing, that's expected — selfHeal retries until it connects.
 apiVersion: k8s.keycloak.org/v2alpha1
 kind: Keycloak
 metadata:
@@ -21,12 +23,12 @@ spec:
     tlsSecret: keycloak-tls
   db:
     vendor: postgres
-    host: __TODO_POSTGRES_HOST__
+    host: platform-postgres-rw.postgres.svc
     usernameSecret:
-      name: keycloak-db-creds
+      name: platform-postgres-app
       key: username
     passwordSecret:
-      name: keycloak-db-creds
+      name: platform-postgres-app
       key: password
   ingress:
     enabled: false   # platform-gateway will proxy to this later (ARCHITECTURE.md §2); no direct ingress needed yet
