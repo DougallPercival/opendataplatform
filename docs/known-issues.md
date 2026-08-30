@@ -198,6 +198,72 @@ actually reaches the branch it's tracking just re-applies the same old config. I
 to take effect, check the live resource directly (e.g. `kubectl get svc ... -o jsonpath='{.spec.ports}'`)
 to confirm what's actually deployed before assuming the fix itself is wrong.
 
+### Keycloak's pod stuck unhealthy after a fresh install — two separate bugs, not one
+
+**What happened:** `platform-0` sat unhealthy for the first ~40 minutes of a fresh install
+(2026-08-30), showing two *different* failures in sequence — worth recording as two bugs, not one,
+since fixing the first one just uncovered the second:
+
+1. `Warning FailedMount ... secret "keycloak-tls" not found`. `spec.http.tlsSecret: keycloak-tls`
+   is Keycloak's own internal HTTPS listener cert, required for the pod to start at all — this is
+   completely independent of `spec.ingress.enabled`. An earlier comment in this repo assumed the
+   hostname TODO "wasn't blocking anything right now" because ingress was disabled; that was true
+   for external routing, not for this field. Nothing in the scaffold created that Secret.
+2. Once that was fixed, the pod moved to `CreateContainerConfigError` /
+   `Error: secret "platform-postgres-app" not found` — see the next entry; this is really the same
+   root cause as the namespace problem below, just surfacing as a container start failure here.
+
+**Status:** both fixed.
+
+- `keycloak-tls`: `manifests/keycloak-instance.yaml` now includes a `cert-manager.io/v1 Certificate`
+  for `keycloak-tls`, issued off the `platform-ca` `ClusterIssuer` (see `manifests/cluster-issuer.yaml`).
+- The Postgres credential: see "Postgres is a shared core service, but its auto-generated credential
+  can't leave its namespace" below.
+
+### Postgres is a shared core service, but its auto-generated credential can't leave its namespace
+
+**What happened:** `postgres-cluster.yaml`'s `bootstrap.initdb` (deliberately, see that file's
+comments) has no `secret:` field, so CNPG auto-generates the `keycloak` role's password itself, into
+a Secret named `platform-postgres-app` — **in the `postgres` namespace**, because that's where the
+`Cluster` resource lives. Kubernetes Secrets can't cross namespaces, and Keycloak's CR lives in the
+`keycloak` namespace, so its `db.usernameSecret`/`passwordSecret` references could never resolve.
+This wasn't a fluke of timing — it was never going to work as written, and it'll happen again for
+any *future* service that wants to use this same shared Postgres cluster from its own namespace.
+
+Checked whether CNPG has a supported way to annotate that auto-generated secret for a mirroring tool
+to pick up (e.g. via `inheritedMetadata`) before reaching for a bigger fix — confirmed via a
+CloudNativePG GitHub discussion that it doesn't: "no direct mechanism for annotating CNPG's
+auto-generated app/superuser secrets."
+([cloudnative-pg/cloudnative-pg#3653](https://github.com/cloudnative-pg/cloudnative-pg/discussions/3653))
+
+**Status:** fixed generally, not just for Keycloak — this will recur for every future service that
+wants this Postgres cluster, so it's solved once at the platform level rather than patched per-app:
+
+- `apps/reflector.yaml` deploys [kubernetes-reflector](https://github.com/emberstack/kubernetes-reflector)
+  (wave 0, core tier) — a small controller that mirrors an annotated Secret into other namespaces and
+  keeps it in sync.
+- `bootstrap/install.sh` (step 2d) generates one real credential — `platform-postgres-keycloak-credentials`,
+  a plain `kubernetes.io/basic-auth` Secret in the `postgres` namespace, **never committed to git** —
+  idempotently (only the first time; re-running the script doesn't rotate an existing credential out
+  from under a running cluster), and annotates it for Reflector's auto-mirror mode
+  (`reflection-auto-namespaces: keycloak`).
+- `manifests/postgres-cluster.yaml`'s `Cluster` now has a `managed.roles` entry for `keycloak` pointing
+  at that Secret — CNPG reconciles the role's actual database password to match it on an ongoing
+  basis, which works whether the cluster is brand new or (like the one this was fixed against)
+  already past its initial bootstrap.
+- `manifests/keycloak-instance.yaml`'s `db.usernameSecret`/`passwordSecret` now point at
+  `platform-postgres-keycloak-credentials` instead of the CNPG-auto-generated one.
+
+**Loose end, harmless:** CNPG's own auto-generated `platform-postgres-app` Secret in the `postgres`
+namespace is now unused — nothing references it anymore, and its password value is stale (CNPG
+doesn't delete it after bootstrap). Left in place rather than cleaned up; not worth the extra
+complexity for a Secret nothing reads.
+
+**To apply this on an already-running cluster:** push, then either re-run `bootstrap/install.sh`
+(every earlier step is idempotent and no-ops on what's already there) or run step 2d's commands by
+hand, then force-refresh `reflector`, `postgres-cluster`, and `keycloak-instance`:
+`kubectl -n argocd annotate application reflector postgres-cluster keycloak-instance argocd.argoproj.io/refresh=hard --overwrite`.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a
@@ -220,3 +286,6 @@ to confirm what's actually deployed before assuming the fix itself is wrong.
   here); verified the `iscsid`-vs-`iscsi.service` distinction against
   [Longhorn's own docs](https://longhorn.io/kb/troubleshooting-open-iscsi-on-rhel/) rather than
   assuming.
+- **`bootstrap/install.sh` now generates `platform-postgres-keycloak-credentials`** (step 2d) and
+  `apps/reflector.yaml` mirrors it across namespaces — see "Postgres is a shared core service, but
+  its auto-generated credential can't leave its namespace" above.

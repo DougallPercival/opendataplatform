@@ -213,6 +213,45 @@ if command -v ip >/dev/null 2>&1; then
   fi
 fi
 
+# ---- 2d. Postgres→Keycloak DB credential (cross-namespace via Reflector) --
+# Kubernetes Secrets are namespace-scoped, but platform-postgres (postgres-
+# operator/postgres-cluster.yaml) is a shared core service and Keycloak lives
+# in its own `keycloak` namespace — CNPG's own auto-generated app secret is
+# stuck in `postgres` and Keycloak's CR can't see it there (this is exactly
+# what left platform-0 in CreateContainerConfigError on 2026-08-30; see
+# docs/known-issues.md). The fix: generate this one credential ourselves,
+# store it as a plain Secret (never committed to git) in the `postgres`
+# namespace, and let apps/reflector.yaml mirror it into `keycloak` (and any
+# future consuming namespace) automatically. postgres-cluster.yaml's
+# managed.roles then reconciles the `keycloak` role's actual password to
+# match it. Idempotent — only generates a password the first time; re-running
+# this script never rotates an existing credential out from under a running
+# cluster.
+info "Ensuring the Postgres→Keycloak credential secret exists..."
+kubectl create namespace postgres --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+if kubectl -n postgres get secret platform-postgres-keycloak-credentials >/dev/null 2>&1; then
+  info "platform-postgres-keycloak-credentials already exists — leaving it as-is."
+else
+  if command -v openssl >/dev/null 2>&1; then
+    DB_PASSWORD="$(openssl rand -base64 24)"
+  else
+    DB_PASSWORD="$(head -c 24 /dev/urandom | base64)"
+  fi
+  kubectl -n postgres create secret generic platform-postgres-keycloak-credentials \
+    --type=kubernetes.io/basic-auth \
+    --from-literal=username=keycloak \
+    --from-literal=password="${DB_PASSWORD}"
+  unset DB_PASSWORD
+  # Annotations tell Reflector (apps/reflector.yaml) to auto-mirror this
+  # Secret into the keycloak namespace, keeping it in sync if it ever changes.
+  kubectl -n postgres annotate secret platform-postgres-keycloak-credentials \
+    reflector.v1.k8s.emberstack.com/reflection-allowed=true \
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled=true \
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces=keycloak \
+    --overwrite
+  success "platform-postgres-keycloak-credentials created."
+fi
+
 # ---- 3. Hand Argo CD the app-of-apps ------------------------------------
 info "Applying the root Application (src/core/argocd/apps)..."
 sed \
@@ -229,4 +268,3 @@ echo ""
 echo "  Still TODO before core is fully healthy — see src/core/argocd/manifests/:"
 echo "   - MetalLB's IP address pool (your actual LAN/cloud subnet)"
 echo "   - cert-manager's ClusterIssuer (ships self-signed by default)"
-echo "   - Keycloak's database connection"

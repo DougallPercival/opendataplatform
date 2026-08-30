@@ -8,12 +8,26 @@
 # is healthy, or k3s's built-in local-path-provisioner if you're testing
 # single-node without Longhorn synced. Set it explicitly if you want to be sure.
 #
-# bootstrap.initdb has NO secret: field on purpose — that's not an oversight.
-# Leaving it out is the documented way to have CNPG generate the app user and
-# a secure random password itself, into an auto-created Secret named
-# "platform-postgres-app" (the "<cluster-name>-app" convention — confirmed
-# against CloudNativePG's own docs, not assumed). That sidesteps needing
-# sealed-secrets/kubeseal just to bootstrap this one credential.
+# bootstrap.initdb still has NO secret: field — CNPG still auto-generates its
+# own "platform-postgres-app" Secret at initdb time to create the `keycloak`
+# role/database, and that's fine; it's just not what anything actually reads
+# credentials from anymore (see managed.roles below). Left as-is rather than
+# removed because there's no way to bootstrap a role/database pair without
+# SOME credential, and this one now gets immediately superseded.
+#
+# managed.roles takes over the `keycloak` role's password on an ongoing basis
+# from platform-postgres-keycloak-credentials — a Secret bootstrap/install.sh
+# creates once (idempotently; never committed to git) IN THIS `postgres`
+# namespace. Added 2026-08-30: CNPG's auto-generated secret is namespace-
+# scoped to `postgres`, but Keycloak's CR lives in the `keycloak` namespace
+# and Kubernetes Secrets can't cross namespaces — Keycloak's pod sat in
+# CreateContainerConfigError the whole time ("secret platform-postgres-app
+# not found") because of this. apps/reflector.yaml mirrors this Secret into
+# `keycloak` (and any future consuming namespace) automatically — see that
+# file and docs/known-issues.md for the full story. managed.roles reconciles
+# the role's actual password to match the Secret going forward regardless of
+# how the role was originally created, so this works whether the cluster is
+# brand new or (like this one) already past its initial bootstrap.
 #
 # Not wired up yet: WAL archiving to MinIO (ARCHITECTURE.md §8's actual backup
 # story). MinIO doesn't exist in this repo yet either — Phase 1. Revisit once
@@ -33,3 +47,10 @@ spec:
     initdb:
       database: keycloak
       owner: keycloak
+  managed:
+    roles:
+      - name: keycloak
+        ensure: present
+        login: true
+        passwordSecret:
+          name: platform-postgres-keycloak-credentials

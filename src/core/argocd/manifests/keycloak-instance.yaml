@@ -1,9 +1,16 @@
 # The Phase 0/Phase 1 sequencing gap noted here previously is resolved:
 # postgres-operator + postgres-cluster (wave 0/1, this same argocd/ tree)
 # pull CloudNativePG forward instead of leaving Keycloak on a TODO. db.host
-# is CNPG's standard "<cluster-name>-rw" read-write Service, and the
-# username/passwordSecret below is the Secret CNPG auto-generates from
-# postgres-cluster.yaml's bootstrap.initdb — nothing to hand-create.
+# is CNPG's standard "<cluster-name>-rw" read-write Service.
+#
+# username/passwordSecret below is NOT the Secret CNPG auto-generates from
+# bootstrap.initdb — that one lives in the `postgres` namespace and Secrets
+# can't cross namespaces, which is exactly what left platform-0 stuck in
+# CreateContainerConfigError ("secret platform-postgres-app not found") for
+# 40 minutes on 2026-08-30. It's platform-postgres-keycloak-credentials
+# instead: a Secret bootstrap/install.sh creates once in `postgres` (see
+# postgres-cluster.yaml's managed.roles) and apps/reflector.yaml mirrors into
+# this namespace automatically. See docs/known-issues.md for the full story.
 #
 # Ordering note: this CR is wave 2, postgres-cluster is wave 1, so Postgres
 # is applied first — but Argo CD's wave gate doesn't deeply health-check a
@@ -40,10 +47,10 @@ spec:
     vendor: postgres
     host: platform-postgres-rw.postgres.svc
     usernameSecret:
-      name: platform-postgres-app
+      name: platform-postgres-keycloak-credentials
       key: username
     passwordSecret:
-      name: platform-postgres-app
+      name: platform-postgres-keycloak-credentials
       key: password
   ingress:
     enabled: false   # platform-gateway will proxy to this later (ARCHITECTURE.md §2); no direct ingress needed yet
