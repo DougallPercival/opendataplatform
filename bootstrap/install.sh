@@ -20,6 +20,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib/common.sh"
 
+# k3s installs its kubectl symlink at /usr/local/bin/kubectl. Some sudo
+# configs (a trimmed secure_path, common on hardened RHEL-family systems)
+# don't include /usr/local/bin even once the file's right there — which
+# silently breaks every bare `kubectl` call below regardless of how this
+# script was invoked. Make sure it's findable no matter what.
+export PATH="/usr/local/bin:${PATH}"
+
 ROLE="control"
 REPO_URL=""
 REVISION=""
@@ -78,8 +85,16 @@ else
   # /usr/local/bin/kubectl normally. Point KUBECONFIG at k3s's own file for
   # the rest of this script either way.
   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  require_cmd kubectl
   info "Waiting for the node to report Ready..."
-  until kubectl get nodes 2>/dev/null | grep -q " Ready"; do sleep 2; done
+  _waited=0
+  until kubectl get nodes 2>/dev/null | grep -q " Ready"; do
+    sleep 2
+    _waited=$((_waited + 2))
+    if [[ $_waited -ge 180 ]]; then
+      die "Node still not Ready after 3 minutes. Check directly: kubectl get nodes / sudo journalctl -u k3s -n 100"
+    fi
+  done
   success "k3s is up."
 fi
 
@@ -90,7 +105,14 @@ if kubectl get namespace argocd >/dev/null 2>&1; then
 else
   info "Installing Argo CD (${ARGOCD_VERSION})..."
   kubectl create namespace argocd
-  kubectl apply -n argocd -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
+  # --server-side: Argo CD's CRDs (applicationsets.argoproj.io especially) are
+  # big enough that plain client-side `kubectl apply` — which stashes the
+  # whole previous config into a last-applied-configuration annotation for
+  # diffing — blows past Kubernetes' 256KiB annotation limit. Server-side
+  # apply tracks field ownership on the API server instead, sidestepping the
+  # annotation entirely. --force-conflicts so a re-run of this script doesn't
+  # error out over field ownership from its own previous run.
+  kubectl apply --server-side --force-conflicts -n argocd -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
   info "Waiting for the Argo CD API server to be ready (this can take a couple of minutes)..."
   kubectl -n argocd wait --for=condition=available --timeout=300s deployment/argocd-server
   success "Argo CD is up."
