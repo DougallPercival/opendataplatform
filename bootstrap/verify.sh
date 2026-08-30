@@ -44,23 +44,39 @@ else
 fi
 
 # ---- Argo CD Applications, with a short settle-in retry -------------------
+# Right after any sync — a fresh install, a resync, adding repo credentials —
+# it's completely normal for several Applications to sit at Unknown (first
+# comparison pending) or Progressing (resources applied, not all ready yet)
+# for a few minutes: cert-manager, keycloak-operator's webhook, and especially
+# postgres-operator/postgres-cluster and monitoring have all done this
+# repeatedly in testing. Retry through both states before reporting, instead
+# of flagging completely expected transient noise the moment this is run
+# right after an install finishes — which is exactly when it's most likely
+# to be run.
 section "Argo CD Applications"
 APP_TRIES=0
-APP_MAX_TRIES=6   # 6 x 10s = up to 1 minute, matching "give it a minute" guidance used all session
+APP_MAX_TRIES=12   # 12 x 10s = up to 2 minutes. Postgres/Keycloak bootstrap can occasionally
+                    # take longer than that on a fresh cluster — if you still see Progressing
+                    # after this script moves on, that's not necessarily wrong, just re-run
+                    # verify.sh again in another minute or two before treating it as a problem.
 while true; do
   APP_ROWS="$(kubectl get applications -n argocd -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.sync.status}{"\t"}{.status.health.status}{"\n"}{end}' 2>/dev/null)"
   STILL_SETTLING=false
   while IFS=$'\t' read -r name sync health; do
     [[ -z "$name" ]] && continue
+    case "$name" in
+      metallb|storage-longhorn) continue ;;   # never worth waiting on — see exceptions below
+    esac
     case "$sync/$health" in
       "Unknown/"*) STILL_SETTLING=true ;;
+      *"/Progressing") STILL_SETTLING=true ;;
     esac
   done <<< "$APP_ROWS"
   if [[ "$STILL_SETTLING" == false || $APP_TRIES -ge $APP_MAX_TRIES ]]; then
     break
   fi
   APP_TRIES=$((APP_TRIES + 1))
-  info "Some Applications still show Unknown (freshly created, first comparison pending) — waiting 10s (try ${APP_TRIES}/${APP_MAX_TRIES})..."
+  info "Some Applications still settling (Unknown or Progressing) — waiting 10s (try ${APP_TRIES}/${APP_MAX_TRIES})..."
   sleep 10
 done
 

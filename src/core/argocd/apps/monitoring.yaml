@@ -44,3 +44,13 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      # kube-prometheus-stack's CRDs (prometheuses.monitoring.coreos.com,
+      # alertmanagers.monitoring.coreos.com, etc.) are large enough that plain
+      # client-side apply's last-applied-configuration annotation blows past
+      # Kubernetes' 262144-byte annotation limit — same failure class as Argo
+      # CD's own applicationsets.argoproj.io CRD and CNPG's CRDs (see
+      # bootstrap/install.sh, postgres-operator.yaml, and docs/known-issues.md).
+      # Confirmed via https://www.arthurkoziel.com/fixing-argocd-crd-too-long-error/ —
+      # ServerSideApply=true alone is the documented fix (Argo CD 2.5+); no
+      # other syncOptions needed alongside it for this chart.
+      - ServerSideApply=true

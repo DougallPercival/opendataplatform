@@ -10,6 +10,15 @@
 # Cluster CR, so "applied" isn't the same as "finished bootstrapping." If
 # this shows Degraded right after a fresh install because Postgres is still
 # initializing, that's expected — selfHeal retries until it connects.
+#
+# Correction (2026-08-30): the comment below about the hostname "not blocking
+# anything" was only true for external routing. http.tlsSecret is a SEPARATE,
+# unconditional requirement — it's Keycloak's own internal HTTPS listener
+# cert, needed for the pod to start at all, completely independent of
+# ingress.enabled. Discovered via `kubectl describe pod platform-0` showing
+# `FailedMount ... secret "keycloak-tls" not found` — nothing in this scaffold
+# created that Secret. Fixed below with a Certificate off the platform-ca
+# ClusterIssuer (see manifests/cluster-issuer.yaml) so cert-manager creates it.
 apiVersion: k8s.keycloak.org/v2alpha1
 kind: Keycloak
 metadata:
@@ -38,3 +47,20 @@ spec:
       key: password
   ingress:
     enabled: false   # platform-gateway will proxy to this later (ARCHITECTURE.md §2); no direct ingress needed yet
+---
+# Keycloak's own internal HTTPS listener cert (http.tlsSecret above) — required
+# for the pod to start regardless of ingress.enabled. Off platform-ca so it's
+# trusted the same way as every other cert on this cluster once that root is
+# imported (see manifests/cluster-issuer.yaml).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: keycloak-tls
+  namespace: keycloak
+spec:
+  secretName: keycloak-tls
+  dnsNames:
+    - keycloak.platform.local
+  issuerRef:
+    name: platform-ca
+    kind: ClusterIssuer
