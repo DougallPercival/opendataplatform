@@ -720,6 +720,26 @@ optional: true</code></pre>
     nfl-betting/
     march-madness/
   docs/</code></pre>
+
+      <h3>Branching &amp; CI</h3>
+      <p style="max-width:66ch">Three long-lived branches, each a step of promotion: <code>main</code> (stable, what you'd stand a deployment up from) &larr; <code>test</code> (integration-validated, candidate for <code>main</code>) &larr; <code>dev</code> (where feature branches land first). Everything else is a short-lived <code>feature/&lt;name&gt;</code> (or <code>fix/&lt;name&gt;</code>) branch cut from <code>dev</code>, merged back into <code>dev</code> via PR, then never touched again.</p>
+      <p style="max-width:66ch">Promotion between the three long-lived branches is also a PR, never a direct push — <code>dev &rarr; test</code> and <code>test &rarr; main</code> — even solo, so every promotion gets a diff and a CI run instead of trusting memory. <code>main</code>, <code>test</code>, and <code>dev</code> are all protected: no direct pushes, PR required, CI must pass before merge. This also happens to line up with how the platform itself is deployed (§3, §6) — if you ever run separate dev/test/prod clusters, Argo CD can point each one at the matching branch, so branch promotion and environment promotion become the same motion instead of two.</p>
+      <p style="max-width:66ch">CI (GitHub Actions, <code>.github/workflows/ci.yml</code>) runs on every PR into <code>dev</code>/<code>test</code>/<code>main</code>, path-filtered so it only lints what actually changed and stays green while most of the repo is still empty:</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Changed paths</th><th>Check</th></tr></thead>
+          <tbody>
+            <tr><td><code>**/*.md</code></td><td>markdownlint</td></tr>
+            <tr><td><code>**/*.yml</code>, <code>**/*.yaml</code></td><td>yamllint</td></tr>
+            <tr><td><code>src/**/*.py</code>, <code>platform-sdk/**</code>, <code>platform-cli/**</code></td><td>ruff + pytest</td></tr>
+            <tr><td><code>**/*.sh</code></td><td>shellcheck</td></tr>
+            <tr><td><code>**/Dockerfile*</code></td><td>hadolint</td></tr>
+            <tr><td><code>charts/**</code>, <code>**/Chart.yaml</code></td><td><code>helm lint</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="max-width:66ch">Each check is a no-op until there's something of that kind to lint, so the pipeline doesn't start red on a docs-only repo — it grows teeth as <code>src/</code>, <code>charts/</code>, and <code>bootstrap/*.sh</code> fill in.</p>
     </section>
 
     <section id="roadmap" class="wide">
