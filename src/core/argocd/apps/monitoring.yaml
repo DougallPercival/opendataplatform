@@ -21,6 +21,20 @@ spec:
       values: |
         grafana:
           defaultDashboardsEnabled: true
+        # node-exporter runs with hostNetwork, so it binds directly to the
+        # HOST's port, not just a container port — 9100 (the chart default)
+        # collided with an existing native node_exporter already running on
+        # this host feeding a separate, pre-existing Prometheus. Moved to
+        # 9101 instead of touching that one. service.port doubles as the
+        # container's actual listen port here; targetPort is kept matching
+        # it on purpose. Scraping keeps working automatically since
+        # Prometheus discovers this via the "metrics" port NAME (unchanged),
+        # not the number — verified against the chart's own ServiceMonitor
+        # template on 2026-08-31.
+        prometheus-node-exporter:
+          service:
+            port: 9101
+            targetPort: 9101
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
