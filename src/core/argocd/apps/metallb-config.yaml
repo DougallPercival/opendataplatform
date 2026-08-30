@@ -13,9 +13,13 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"
 spec:
   project: default
+  # Hardcoded, not __REPO_URL__/__REVISION__ — see README.md ("Self-referencing
+  # apps") for why: install.sh's placeholder substitution only ever touches
+  # root-app.yaml, never the files under apps/, which Argo CD reads straight
+  # from git with no templating of its own.
   source:
-    repoURL: __REPO_URL__
-    targetRevision: __REVISION__
+    repoURL: git@github.com:DougallPercival/opendataplatform.git
+    targetRevision: dev
     path: src/core/argocd/manifests
     directory:
       include: "metallb-pool.yaml"

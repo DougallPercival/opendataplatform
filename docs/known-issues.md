@@ -114,6 +114,43 @@ kubectl`), `kill` it and the parent `teardown.sh`/`sudo bash` processes, then ru
 `kubectl -n argocd patch application root --type=merge -p '{"metadata":{"finalizers":null}}'`
 by hand before continuing with `kubectl delete namespace argocd` and `k3s-uninstall.sh` yourself.
 
+### `__REPO_URL__`/`__REVISION__` placeholders left un-substituted in `apps/*.yaml`
+
+**What happened:** `postgres-cluster`, `cert-manager-issuers`, `metallb-config`, and
+`keycloak-instance` — the four `Application` manifests that source `manifests/*.yaml` from this
+same repo, rather than an external chart — still had the literal strings `__REPO_URL__` and
+`__REVISION__` as their `repoURL`/`targetRevision`. `bootstrap/install.sh`'s `sed` substitution
+only ever runs against `root-app.yaml`, the one file it applies directly; everything under
+`apps/` is read straight from git by Argo CD itself, with no templating step of its own. All four
+sat stuck at `Unknown` sync status indefinitely — no crash, no clear top-level error, just silently
+never resolving, since `kubectl get applications` doesn't surface the underlying comparison error
+without an explicit `-o jsonpath='{.status.conditions}'` lookup.
+
+**Status:** fixed by hardcoding real values directly in each manifest (see
+`src/core/argocd/README.md`'s "Self-referencing apps" section for the full reasoning and the
+tradeoff this creates — these four won't automatically follow `root` if you ever bootstrap from a
+branch other than `dev`).
+
+### `sealed-secrets`'s chart repo 404ing
+
+**What happened:** `https://bitnami-labs.github.io/sealed-secrets/index.yaml` started returning
+`404 Not Found`. The project's GitHub org renamed from `bitnami-labs` to `bitnami` at some point
+after this manifest was first written, and the old Pages URL didn't redirect.
+
+**Status:** fixed — `apps/sealed-secrets.yaml` now points at `https://bitnami.github.io/sealed-secrets`,
+version bumped to the current `2.19.3` (appVersion `0.39.1`) since the old `2.16.1` pin predated the
+move. Re-verified on 2026-08-30 that this is still the free, independently-maintained project, not
+Bitnami's paywalled general catalog.
+
+### Manual `sudo kubectl`/`sudo k3s-...` commands need the full path
+
+**Reminder, not a script bug:** the `PATH` fix in `bootstrap/lib/common.sh` only helps commands run
+*inside* the bootstrap scripts. Typing `sudo kubectl ...` or `sudo k3s-uninstall.sh` directly in your
+own shell is a fresh `sudo` invocation, and `sudo` resolves commands via its own `secure_path`, not
+your shell's `$PATH` — which is why this same `/usr/local/bin` gap bites again for any manual
+command. Either type the full path (`sudo /usr/local/bin/kubectl ...`), or fix it once at the host
+level via `sudo visudo` — find the `Defaults secure_path = ...` line and add `/usr/local/bin` to it.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a

@@ -12,9 +12,18 @@ metadata:
     argocd.argoproj.io/sync-wave: "1"
 spec:
   project: default
+  # repoURL/targetRevision are hardcoded, not __REPO_URL__/__REVISION__ like
+  # root-app.yaml: those placeholders only ever get resolved by install.sh's
+  # sed, which runs ONLY against root-app.yaml before applying it directly.
+  # Everything under src/core/argocd/apps/ (this file included) is read
+  # straight from git BY ARGO CD ITSELF, with no templating step of its own —
+  # a placeholder left in here is a literal, permanently-broken repoURL, not
+  # a value that gets filled in later. Update targetRevision by hand if you
+  # deliberately bootstrap from a different branch than dev (see
+  # docs/known-issues.md).
   source:
-    repoURL: __REPO_URL__
-    targetRevision: __REVISION__
+    repoURL: git@github.com:DougallPercival/opendataplatform.git
+    targetRevision: dev
     path: src/core/argocd/manifests
     directory:
       include: "postgres-cluster.yaml"

@@ -22,3 +22,27 @@ point at directly: the MetalLB IP pool, the cert-manager ClusterIssuer, the Keyc
 the pieces with values specific to *your* network/cluster — each has a `TODO` comment marking what
 to fill in before it'll actually go healthy. Nothing here is wrong to leave on defaults temporarily;
 Argo CD will just show that Application as degraded until the TODO is addressed.
+
+## Self-referencing apps — why `repoURL`/`targetRevision` are hardcoded, not templated
+
+`root-app.yaml` uses `__REPO_URL__`/`__REVISION__` placeholders that `bootstrap/install.sh`
+substitutes with `sed` before applying it — that's what lets `install.sh` auto-detect your remote
+and current branch instead of hardcoding them. That substitution is a one-time, one-file thing:
+it runs only against `root-app.yaml`, right before the script hands it to `kubectl apply`.
+
+Every other `Application` in this folder is read straight from GitHub *by Argo CD itself* once
+`root` starts reconciling — there's no script in the loop, and Argo CD has no templating
+mechanism for a plain `directory:`-sourced Application. So any Application manifest in here that
+points back at this same repo (`postgres-cluster`, `cert-manager-issuers`, `metallb-config`,
+`keycloak-instance` — the ones sourcing `manifests/*.yaml` from this repo, as opposed to an
+external chart) has to use a real, literal `repoURL`/`targetRevision`, not a placeholder. A
+placeholder left in one of these isn't "filled in later" the way it is in `root-app.yaml` — it's
+a permanently broken source that Argo CD can never resolve, and it fails silently as a stuck
+`Unknown` sync status with no obvious symptom pointing at the cause (this bit us in testing —
+see `docs/known-issues.md`).
+
+Current convention: these four hardcode `repoURL: git@github.com:DougallPercival/opendataplatform.git`
+and `targetRevision: dev`. If you deliberately bootstrap from a different branch (a feature branch,
+say, for isolated testing), `root` itself will track it fine via `--revision`, but these four will
+keep tracking `dev` until you update them by hand — a known, accepted limitation of this pattern
+rather than something `install.sh` can fix for you.
