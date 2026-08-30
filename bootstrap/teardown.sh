@@ -26,11 +26,27 @@ fi
 
 if kubectl get namespace argocd >/dev/null 2>&1; then
   info "Deleting modules-enabled Applications (if any)..."
-  kubectl delete applications -n argocd -l platform.io/tier=module --ignore-not-found
+  kubectl delete applications -n argocd -l platform.io/tier=module --ignore-not-found --timeout=60s \
+    || warn "Timed out deleting module-tier Applications — continuing anyway (k3s-uninstall.sh below wipes the node regardless)."
 
   info "Deleting core Applications..."
-  kubectl delete applications -n argocd -l platform.io/tier=core --ignore-not-found
-  kubectl delete application root -n argocd --ignore-not-found
+  kubectl delete applications -n argocd -l platform.io/tier=core --ignore-not-found --timeout=60s \
+    || warn "Timed out deleting core-tier Applications — continuing anyway (k3s-uninstall.sh below wipes the node regardless)."
+
+  # root (only root — see root-app.yaml) carries the cascade-delete finalizer
+  # resources-finalizer.argocd.argoproj.io, so Argo CD tears down everything it
+  # manages before this object actually finalizes. Unlike the label-selector
+  # deletes above, a plain `kubectl delete` here has NO default timeout — so a
+  # stalled cascade (seen in testing: a crash-looping operator that can't finish
+  # processing one of its own custom resources' finalizers) blocks forever with
+  # zero output, no error, nothing to Ctrl-C into. Bound it, and if it doesn't
+  # finish in time, force it through: we're about to wipe the whole node with
+  # k3s-uninstall.sh anyway, so nothing is lost by dropping the finalizer rather
+  # than tracking down why the cascade got stuck.
+  if ! kubectl delete application root -n argocd --ignore-not-found --timeout=90s; then
+    warn "root Application's cascade delete didn't finish in 90s (likely a stuck finalizer on a crashing operator's own custom resource) — forcing it through."
+    kubectl -n argocd patch application root --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+  fi
 
   info "Waiting for Argo CD to finish pruning (best-effort, 60s)..."
   sleep 60 || true

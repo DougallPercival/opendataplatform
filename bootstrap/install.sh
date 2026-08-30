@@ -26,6 +26,7 @@ REPO_URL=""
 REVISION=""
 ARGOCD_VERSION="stable"
 SKIP_K3S=false
+REPO_SSH_KEY=""
 
 usage() {
   cat <<EOF
@@ -35,6 +36,13 @@ Usage: bootstrap/install.sh [options]
   --revision <branch>  Branch/tag for Argo CD to track (default: current branch)
   --role <role>        Node role for this machine: control|storage|compute (default: control)
   --skip-k3s           Don't touch k3s — use it against an existing cluster (any distro)
+  --repo-ssh-key <path> Path to an SSH private key (a read-only deploy key is enough) that
+                        Argo CD's repo-server should use to clone REPO_URL. Only needed if
+                        REPO_URL is private. Registers it as a repository credential Secret
+                        in the argocd namespace, so you don't have to do this by hand after
+                        every install (it lives in the argocd namespace, so a teardown that
+                        deletes that namespace takes it with it — pass this again on re-install
+                        rather than repeating docs/known-issues.md's manual steps).
   -h, --help            Show this help
 
 Phase 0 gets you: k3s, Argo CD, and the app-of-apps handoff. MetalLB's IP pool and the ingress/
@@ -49,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --revision) REVISION="$2"; shift 2 ;;
     --role) ROLE="$2"; shift 2 ;;
     --skip-k3s) SKIP_K3S=true; shift ;;
+    --repo-ssh-key) REPO_SSH_KEY="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
   esac
@@ -110,6 +119,27 @@ else
   info "Waiting for the Argo CD API server to be ready (this can take a couple of minutes)..."
   kubectl -n argocd wait --for=condition=available --timeout=300s deployment/argocd-server
   success "Argo CD is up."
+fi
+
+# ---- 2b. Repo credentials (only if REPO_URL is private) -----------------
+if [[ -n "$REPO_SSH_KEY" ]]; then
+  [[ -f "$REPO_SSH_KEY" ]] || die "--repo-ssh-key path not found: $REPO_SSH_KEY"
+  info "Registering repo credentials with Argo CD's repo-server..."
+  # Argo CD's repo-server has no credentials of its own by default — cloning
+  # this repo from the host shell (e.g. the deploy key used for `git clone`
+  # here) does NOT give the repo-server pod any access. Without this, a
+  # private REPO_URL fails with something like: "error creating SSH agent:
+  # SSH agent requested but SSH_AUTH_SOCK not-specified". Apply is idempotent
+  # (dry-run|apply) so re-running install.sh with the same key is a no-op.
+  kubectl -n argocd create secret generic gitops-repo-credentials \
+    --from-literal=type=git \
+    --from-literal=url="${REPO_URL}" \
+    --from-file=sshPrivateKey="${REPO_SSH_KEY}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n argocd label secret gitops-repo-credentials argocd.argoproj.io/secret-type=repository --overwrite
+  success "Repo credentials registered."
+else
+  info "No --repo-ssh-key given — skipping repo credential setup (fine if REPO_URL is public; see docs/known-issues.md if it isn't)."
 fi
 
 # ---- 3. Hand Argo CD the app-of-apps ------------------------------------

@@ -80,6 +80,40 @@ No longer needed at all now that Postgres runs via CloudNativePG inside the clus
 **General lesson:** if `install.sh` fails on a seemingly unrelated repo/package error, check
 `dnf repolist all` for anything stale or broken before assuming the script itself is wrong.
 
+### Private repo credentials for Argo CD
+
+**What happened:** the deploy key used to `git clone` this repo onto the host only authenticates
+the host's own git client — it does nothing for Argo CD's `repo-server` pod, which has no
+credentials of its own by default. First sync of `root` failed with `error creating SSH agent:
+SSH agent requested but SSH_AUTH_SOCK not-specified`.
+
+**Status:** fixed at the script level. `bootstrap/install.sh` now takes `--repo-ssh-key <path>` and
+registers that key as a repository credential Secret in the `argocd` namespace automatically.
+Because that Secret lives in the `argocd` namespace, `bootstrap/teardown.sh` deletes it along with
+everything else — pass `--repo-ssh-key` again on every fresh `install.sh` run against a private
+repo, same as any other flag. No need to hand-create the Secret anymore.
+
+### `teardown.sh` hanging forever on `kubectl delete application root`
+
+**What happened:** `root` (only `root` — see `src/core/argocd/root-app.yaml`) carries the
+cascade-delete finalizer `resources-finalizer.argocd.argoproj.io`, so Argo CD tears down
+everything it manages before the object actually finalizes. In testing, that cascade stalled —
+most likely tangled up with the crash-looping `postgres-operator` pod from the CRD-size issue
+above, which couldn't finish processing one of its own custom resources' finalizers. The
+`kubectl delete application root` line had no timeout, so it blocked the whole script silently,
+forever, with zero output — no error, no progress, nothing to Ctrl-C into except an unresponsive
+terminal.
+
+**Status:** fixed at the script level (see changelog below) — bounded timeouts on every delete in
+this stage, and if `root`'s cascade specifically doesn't finish in 90s, the script now forces it
+through by stripping the finalizer directly, on the reasoning that `k3s-uninstall.sh` right after
+wipes the whole node regardless, so there's nothing to lose by not waiting out a stuck cascade.
+
+If you're ever stuck on an older copy of this script: find the hung process (`ps aux | grep
+kubectl`), `kill` it and the parent `teardown.sh`/`sudo bash` processes, then run
+`kubectl -n argocd patch application root --type=merge -p '{"metadata":{"finalizers":null}}'`
+by hand before continuing with `kubectl delete namespace argocd` and `k3s-uninstall.sh` yourself.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a
