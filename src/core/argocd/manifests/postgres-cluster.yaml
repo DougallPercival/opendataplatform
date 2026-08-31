@@ -4,9 +4,12 @@
 # §12's DR discussion).
 #
 # storage.storageClass is left unset on purpose: CNPG will use the cluster's
-# default StorageClass, which is Longhorn once src/core/argocd/apps/storage.yaml
-# is healthy, or k3s's built-in local-path-provisioner if you're testing
-# single-node without Longhorn synced. Set it explicitly if you want to be sure.
+# default StorageClass, whatever that is on this environment — Longhorn once
+# apps/optional/storage-longhorn/storage.yaml is applied and healthy (see
+# README.md's "Portability" section — --enable-longhorn), a cloud block-storage
+# CSI driver's default class on EKS/GKE/AKS/etc., or k3s's built-in
+# local-path-provisioner if you're testing single-node with neither. Set it
+# explicitly if you want to be sure which one this cluster actually uses.
 #
 # bootstrap.initdb still has NO secret: field — CNPG still auto-generates its
 # own "platform-postgres-app" Secret at initdb time to create the `keycloak`

@@ -7,9 +7,23 @@
 #   1. Installs k3s if one isn't already running (control-node role,
 #      traefik + servicelb disabled — we bring our own ingress + MetalLB).
 #   2. Installs Argo CD (official stable manifest).
-#   3. Applies ONE Application (the "app of apps") pointing Argo CD at
-#      src/core/argocd/apps in THIS repo, on the branch you're currently on
-#      (or --revision, if you want it tracking something else).
+#   3. Applies the root Application (the "app of apps") pointing Argo CD at
+#      src/core/argocd/apps/core in THIS repo, on the branch you're currently
+#      on (or --revision, if you want it tracking something else) — this half
+#      always applies, on every environment.
+#   4. Conditionally applies one small root Application per OPTIONAL
+#      capability (MetalLB, Longhorn) — see "Portability" below.
+#
+# Portability (2026-08-31): apps/core/ is the environment-agnostic half of the
+# platform — works identically on a homelab box, a self-hosted data centre,
+# cloud VMs you run k8s on yourself, or a managed service like EKS/GKE/AKS.
+# apps/optional/<capability>/ holds the pieces that only make sense on SOME
+# of those (MetalLB needs a subnet to ARP on; Longhorn needs disks to
+# replicate across) — each gated by its own flag below, defaulting to
+# whatever this repo was originally built for (a self-hosted box with no
+# cloud LB/block-storage underneath it). See src/core/argocd/README.md's
+# "Portability" section for the full design and the flag-per-environment
+# table.
 #
 # From here on, adding/removing anything is a git operation, not a script —
 # see the Add-ons page / platform-cli / modules-enabled/ in ARCHITECTURE.md §3.
@@ -28,6 +42,8 @@ ARGOCD_VERSION="stable"
 SKIP_K3S=false
 REPO_SSH_KEY=""
 SKIP_ISCSI=false
+SKIP_METALLB=false
+ENABLE_LONGHORN=false
 
 usage() {
   cat <<EOF
@@ -36,7 +52,9 @@ Usage: bootstrap/install.sh [options]
   --repo-url <url>     Git remote for Argo CD to track (default: this clone's 'origin')
   --revision <branch>  Branch/tag for Argo CD to track (default: current branch)
   --role <role>        Node role for this machine: control|storage|compute (default: control)
-  --skip-k3s           Don't touch k3s — use it against an existing cluster (any distro)
+  --skip-k3s           Don't touch k3s — use it against an existing cluster (any distro,
+                        including managed services like EKS/GKE/AKS: point kubectl/KUBECONFIG
+                        at it first, then run this with --skip-k3s --skip-metallb).
   --repo-ssh-key <path> Path to an SSH private key (a read-only deploy key is enough) that
                         Argo CD's repo-server should use to clone REPO_URL. Only needed if
                         REPO_URL is private. Registers it as a repository credential Secret
@@ -44,16 +62,27 @@ Usage: bootstrap/install.sh [options]
                         every install (it lives in the argocd namespace, so a teardown that
                         deletes that namespace takes it with it — pass this again on re-install
                         rather than repeating docs/known-issues.md's manual steps).
-  --skip-iscsi          Don't touch host iSCSI packages/services (Longhorn's prerequisite) —
+  --skip-metallb        Don't deploy MetalLB (src/core/argocd/apps/optional/metallb/) — for any
+                        environment where a cloud provider already hands out real LoadBalancer
+                        IPs (EKS/GKE/AKS, or self-managed k8s on cloud VMs using that cloud's LB
+                        integration). Default: MetalLB IS deployed — the common case for a
+                        homelab/self-hosted box with no cloud LB underneath it.
+  --enable-longhorn      Deploy Longhorn (src/core/argocd/apps/optional/storage-longhorn/) for
+                        replicated storage across this cluster's own node disks. Default: off —
+                        single-node testing works fine on k3s's built-in local-path-provisioner,
+                        and any environment with cloud block storage (EKS/GKE/AKS, or self-managed
+                        k8s on cloud VMs) doesn't need this at all. Also installs/enables iscsid
+                        (Longhorn's host prerequisite) unless --skip-iscsi.
+  --skip-iscsi          When --enable-longhorn is set, don't touch host iSCSI packages/services —
                         useful on a managed/cloud node where you don't want this script running
-                        dnf/apt as root on your behalf, or if you're deliberately staying on
-                        local-path-provisioner for now (single-node testing doesn't need this
-                        at all — see docs/known-issues.md).
+                        dnf/apt as root on your behalf, or if you'll manage iscsid yourself. Has
+                        no effect without --enable-longhorn (see docs/known-issues.md).
   -h, --help            Show this help
 
-Phase 0 gets you: k3s, Argo CD, and the app-of-apps handoff. MetalLB's IP pool and the ingress/
-cert-manager issuer still need values filled in for YOUR network — see the TODOs Argo CD will
-surface as it syncs (src/core/argocd/manifests/).
+Phase 0 gets you: k3s, Argo CD, and the app-of-apps handoff (core + whichever optional
+capabilities you asked for). See src/core/argocd/README.md's "Portability" section for the full
+flag-per-environment table. The ingress/cert-manager issuer still needs values filled in for a
+real deployment — see the TODOs Argo CD will surface as it syncs (src/core/argocd/manifests/).
 EOF
 }
 
@@ -65,6 +94,8 @@ while [[ $# -gt 0 ]]; do
     --skip-k3s) SKIP_K3S=true; shift ;;
     --repo-ssh-key) REPO_SSH_KEY="$2"; shift 2 ;;
     --skip-iscsi) SKIP_ISCSI=true; shift ;;
+    --skip-metallb) SKIP_METALLB=true; shift ;;
+    --enable-longhorn) ENABLE_LONGHORN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
   esac
@@ -80,18 +111,19 @@ info "Revision: $REVISION"
 info "Role:     $ROLE"
 
 # ---- 0. iSCSI (Longhorn's host prerequisite) ----------------------------
-# Best-effort, non-fatal: Longhorn (storage-longhorn Application) needs iscsid
-# running on any node that'll host its volumes, or its pods just never go
-# healthy with no obvious host-level cause. Not needed at all for single-node
-# testing on k3s's built-in local-path-provisioner (see docs/known-issues.md)
-# — this only matters once storage-longhorn's automated sync is actually
-# turned back on. Package name and the iscsid-vs-iscsi.service distinction
-# verified against Longhorn's own troubleshooting docs, not assumed:
+# Only runs at all when Longhorn itself is going to be deployed (--enable-longhorn)
+# — Longhorn (apps/optional/storage-longhorn/storage.yaml) needs iscsid running
+# on any node that'll host its volumes, or its pods just never go healthy with
+# no obvious host-level cause. Best-effort, non-fatal even when it does run.
+# Package name and the iscsid-vs-iscsi.service distinction verified against
+# Longhorn's own troubleshooting docs, not assumed:
 # https://longhorn.io/kb/troubleshooting-open-iscsi-on-rhel/ — iscsid is the
 # daemon Longhorn actually talks to; iscsi.service does unrelated boot-time
 # node auto-discovery and is deliberately left alone/disabled.
-if [[ "$SKIP_ISCSI" == true ]]; then
-  info "Skipping iSCSI setup (--skip-iscsi)."
+if [[ "$ENABLE_LONGHORN" != true ]]; then
+  info "Longhorn not requested (--enable-longhorn not set) — skipping iSCSI setup too."
+elif [[ "$SKIP_ISCSI" == true ]]; then
+  info "Skipping iSCSI setup (--skip-iscsi) — you'll need iscsid running yourself before Longhorn goes healthy."
 elif systemctl is-active --quiet iscsid 2>/dev/null; then
   info "iscsid already running — leaving it as-is."
 elif command -v dnf >/dev/null 2>&1; then
@@ -183,6 +215,7 @@ else
 fi
 
 # ---- 2c. Sanity-check MetalLB's committed range against this host's subnet
+# Only relevant when MetalLB is actually going to be deployed (not --skip-metallb).
 # metallb-pool.yaml's IP range has to be real, network-specific values (see
 # docs/known-issues.md — there's no way to derive "which slice of your subnet
 # is safe" automatically, so it's committed as a concrete range, not a
@@ -192,7 +225,9 @@ fi
 # doesn't work AT ALL, since it ARPs on the local subnet. Warn loudly here
 # rather than let that surface later as "ingress-nginx's external IP never
 # leaves <pending>" with no obvious cause.
-if command -v ip >/dev/null 2>&1; then
+if [[ "$SKIP_METALLB" == true ]]; then
+  info "MetalLB not requested (--skip-metallb) — skipping its subnet sanity-check too."
+elif command -v ip >/dev/null 2>&1; then
   POOL_FILE="${REPO_ROOT}/src/core/argocd/manifests/metallb-pool.yaml"
   if [[ -f "$POOL_FILE" ]]; then
     POOL_FIRST_IP="$(grep -m1 -oE '([0-9]{1,3}\.){3}[0-9]{1,3}-' "$POOL_FILE" | head -1 | sed 's/-$//')"
@@ -221,8 +256,8 @@ fi
 # what left platform-0 in CreateContainerConfigError on 2026-08-30; see
 # docs/known-issues.md). The fix: generate this one credential ourselves,
 # store it as a plain Secret (never committed to git) in the `postgres`
-# namespace, and let apps/reflector.yaml mirror it into `keycloak` (and any
-# future consuming namespace) automatically. postgres-cluster.yaml's
+# namespace, and let apps/core/reflector.yaml mirror it into `keycloak` (and
+# any future consuming namespace) automatically. postgres-cluster.yaml's
 # managed.roles then reconciles the `keycloak` role's actual password to
 # match it. Idempotent — only generates a password the first time; re-running
 # this script never rotates an existing credential out from under a running
@@ -252,19 +287,50 @@ else
   success "platform-postgres-keycloak-credentials created."
 fi
 
-# ---- 3. Hand Argo CD the app-of-apps ------------------------------------
-info "Applying the root Application (src/core/argocd/apps)..."
+# ---- 3. Hand Argo CD the core app-of-apps -------------------------------
+# Always applied — apps/core/ is the environment-agnostic half of the
+# platform (see the portability note at the top of this file).
+info "Applying the root Application (src/core/argocd/apps/core)..."
 sed \
   -e "s|__REPO_URL__|${REPO_URL}|g" \
   -e "s|__REVISION__|${REVISION}|g" \
   "${REPO_ROOT}/src/core/argocd/root-app.yaml" | kubectl apply -f -
 
-success "Done. Argo CD is reconciling src/core/argocd/apps from ${REPO_URL}@${REVISION}."
+# ---- 4. Hand Argo CD the optional capabilities requested -----------------
+# Each of these is its own small root Application, applied the same way as
+# core's — only the ones the flags above asked for. See src/core/argocd/
+# optional/*.yaml and README.md's "Portability" section.
+APPLIED_OPTIONAL=()
+if [[ "$SKIP_METALLB" != true ]]; then
+  info "Applying optional capability: MetalLB (src/core/argocd/apps/optional/metallb)..."
+  sed \
+    -e "s|__REPO_URL__|${REPO_URL}|g" \
+    -e "s|__REVISION__|${REVISION}|g" \
+    "${REPO_ROOT}/src/core/argocd/optional/metallb-app.yaml" | kubectl apply -f -
+  APPLIED_OPTIONAL+=("metallb")
+fi
+if [[ "$ENABLE_LONGHORN" == true ]]; then
+  info "Applying optional capability: Longhorn (src/core/argocd/apps/optional/storage-longhorn)..."
+  sed \
+    -e "s|__REPO_URL__|${REPO_URL}|g" \
+    -e "s|__REVISION__|${REVISION}|g" \
+    "${REPO_ROOT}/src/core/argocd/optional/storage-longhorn-app.yaml" | kubectl apply -f -
+  APPLIED_OPTIONAL+=("storage-longhorn")
+fi
+
+success "Done. Argo CD is reconciling core from ${REPO_URL}@${REVISION}."
+if [[ ${#APPLIED_OPTIONAL[@]} -gt 0 ]]; then
+  success "Optional capabilities applied: ${APPLIED_OPTIONAL[*]}"
+else
+  info "No optional capabilities applied (--skip-metallb was set, --enable-longhorn wasn't) — core only."
+fi
 echo ""
 echo "  Watch it sync:   kubectl get applications -n argocd -w"
 echo "  Argo CD UI:       kubectl -n argocd port-forward svc/argocd-server 8080:443"
 echo "                     (initial admin password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)"
 echo ""
 echo "  Still TODO before core is fully healthy — see src/core/argocd/manifests/:"
-echo "   - MetalLB's IP address pool (your actual LAN/cloud subnet)"
+if [[ "$SKIP_METALLB" != true ]]; then
+  echo "   - MetalLB's IP address pool (your actual LAN/cloud subnet)"
+fi
 echo "   - cert-manager's ClusterIssuer (ships self-signed by default)"

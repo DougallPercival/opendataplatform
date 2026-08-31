@@ -33,20 +33,37 @@ if kubectl get namespace argocd >/dev/null 2>&1; then
   kubectl delete applications -n argocd -l platform.io/tier=core --ignore-not-found --timeout=60s \
     || warn "Timed out deleting core-tier Applications — continuing anyway (k3s-uninstall.sh below wipes the node regardless)."
 
-  # root (only root — see root-app.yaml) carries the cascade-delete finalizer
-  # resources-finalizer.argocd.argoproj.io, so Argo CD tears down everything it
-  # manages before this object actually finalizes. Unlike the label-selector
-  # deletes above, a plain `kubectl delete` here has NO default timeout — so a
-  # stalled cascade (seen in testing: a crash-looping operator that can't finish
-  # processing one of its own custom resources' finalizers) blocks forever with
-  # zero output, no error, nothing to Ctrl-C into. Bound it, and if it doesn't
-  # finish in time, force it through: we're about to wipe the whole node with
-  # k3s-uninstall.sh anyway, so nothing is lost by dropping the finalizer rather
-  # than tracking down why the cascade got stuck.
-  if ! kubectl delete application root -n argocd --ignore-not-found --timeout=90s; then
-    warn "root Application's cascade delete didn't finish in 90s (likely a stuck finalizer on a crashing operator's own custom resource) — forcing it through."
-    kubectl -n argocd patch application root --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-  fi
+  # platform.io/tier=optional catches whichever of metallb/metallb-config/
+  # storage-longhorn actually got applied (see src/core/argocd/README.md's
+  # "Portability" section — install.sh only applies the ones its flags asked
+  # for, so this is a no-op for whichever weren't).
+  info "Deleting optional-capability Applications (if any)..."
+  kubectl delete applications -n argocd -l platform.io/tier=optional --ignore-not-found --timeout=60s \
+    || warn "Timed out deleting optional-tier Applications — continuing anyway (k3s-uninstall.sh below wipes the node regardless)."
+
+  # root, optional-metallb, and optional-storage-longhorn all carry the
+  # cascade-delete finalizer resources-finalizer.argocd.argoproj.io (they're
+  # each their own app-of-apps root — see root-app.yaml and optional/*.yaml),
+  # so Argo CD tears down everything each one manages before it actually
+  # finalizes. Unlike the label-selector deletes above, a plain `kubectl
+  # delete` on one of these has NO default timeout — so a stalled cascade
+  # (seen in testing: a crash-looping operator that can't finish processing
+  # one of its own custom resources' finalizers) blocks forever with zero
+  # output, no error, nothing to Ctrl-C into. Bound each one, and if it
+  # doesn't finish in time, force it through: we're about to wipe the whole
+  # node with k3s-uninstall.sh anyway, so nothing is lost by dropping the
+  # finalizer rather than tracking down why the cascade got stuck. Only
+  # root is guaranteed to exist — the other two are only present if their
+  # capability was ever applied, hence --ignore-not-found.
+  for root_app in root optional-metallb optional-storage-longhorn; do
+    if ! kubectl get application "$root_app" -n argocd >/dev/null 2>&1; then
+      continue
+    fi
+    if ! kubectl delete application "$root_app" -n argocd --ignore-not-found --timeout=90s; then
+      warn "${root_app} Application's cascade delete didn't finish in 90s (likely a stuck finalizer on a crashing operator's own custom resource) — forcing it through."
+      kubectl -n argocd patch application "$root_app" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+    fi
+  done
 
   info "Waiting for Argo CD to finish pruning (best-effort, 60s)..."
   sleep 60 || true

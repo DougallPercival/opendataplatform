@@ -264,6 +264,19 @@ complexity for a Secret nothing reads.
 hand, then force-refresh `reflector`, `postgres-cluster`, and `keycloak-instance`:
 `kubectl -n argocd annotate application reflector postgres-cluster keycloak-instance argocd.argoproj.io/refresh=hard --overwrite`.
 
+**One more step this actually needed, worth remembering for next time:** after all of the above
+synced clean (`keycloak-instance` Synced/Healthy, correct secret name confirmed in both the live
+`Keycloak` CR's `spec.db` and the `StatefulSet`'s pod template env vars), `platform-0` itself *still*
+didn't restart — same pod object, same 88-minute-old failure, still erroring on the old secret name.
+The Keycloak operator's `StatefulSet` uses `updateStrategy: OnDelete` — the operator deliberately
+controls pod rollout timing itself rather than letting Kubernetes replace pods automatically the
+moment the template changes, so an already-running pod keeps its stale spec until something actually
+deletes it. Fix was `kubectl -n keycloak delete pod platform-0` — safe here since it had never
+started successfully, so there was no session/data state on it to lose. **Any future change to
+`keycloak-instance.yaml`'s `Keycloak` CR will hit this same gap** — check `spec.updateStrategy.type`
+on the `platform` `StatefulSet` if a CR change syncs clean but the pod doesn't visibly react, and
+delete the pod by hand if it's `OnDelete`.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a

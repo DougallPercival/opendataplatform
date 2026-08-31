@@ -2,13 +2,17 @@
 # this is pure config: your network's address range, not a piece of software.
 # Wave 1 so the MetalLB controller (wave 0) is already healthy before these
 # CRs get created.
+#
+# Optional (2026-08-31) — only synced alongside metallb.yaml itself, when
+# install.sh applies optional/metallb-app.yaml (see README.md's "Portability"
+# section).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: metallb-config
   namespace: argocd
   labels:
-    platform.io/tier: core
+    platform.io/tier: optional
   annotations:
     argocd.argoproj.io/sync-wave: "1"
 spec:
