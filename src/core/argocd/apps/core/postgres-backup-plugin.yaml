@@ -12,13 +12,14 @@
 #
 # One-time gotcha confirmed in testing (2026-09-01), not a bug in this repo:
 # the CNPG operator only enumerates available plugins at its OWN startup, not
-# continuously — if postgres-operator was already running before this app
-# first syncs (its usual case, since postgres-operator is wave 0 and comes up
-# well before this wave-1 app does), backups fail with "requested plugin is
-# not available" until the operator is restarted once:
-# `kubectl -n cnpg-system rollout restart deployment postgres-operator-cloudnative-pg`.
-# See docs/known-issues.md for the full writeup — only needed once per
-# cluster; the operator remembers the plugin across its own future restarts.
+# continuously — postgres-operator being wave 0 and this being wave 1 means
+# the operator is reliably already running (and has already missed this
+# plugin) by the time it first appears. bootstrap/install.sh's final step
+# handles this automatically on a fresh bring-up (waits for this plugin,
+# then restarts the operator once) — the only case still needing the manual
+# fix is adding this to an already-running cluster whose operator has been
+# up a while, same as what happened during testing. See docs/known-issues.md
+# for the full writeup and that manual fix if you ever need it.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

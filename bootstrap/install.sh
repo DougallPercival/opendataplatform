@@ -220,6 +220,12 @@ else
   success "Argo CD is up."
 fi
 
+# Captured now, before anything below creates it — used by step 5 to tell a
+# genuinely fresh CNPG bring-up (needs the plugin-discovery dance) apart from
+# an already-running one (doesn't).
+CNPG_SYSTEM_PRE_EXISTED=false
+kubectl get namespace cnpg-system >/dev/null 2>&1 && CNPG_SYSTEM_PRE_EXISTED=true
+
 # ---- 2b. Repo credentials (only if REPO_URL is private) -----------------
 if [[ -n "$REPO_SSH_KEY" ]]; then
   [[ -f "$REPO_SSH_KEY" ]] || die "--repo-ssh-key path not found: $REPO_SSH_KEY"
@@ -365,6 +371,38 @@ else
   fi
 fi
 
+# ---- 2f. Postgres→catalog-service DB credential (cross-namespace via -----
+#          Reflector) — same exact pattern as 2d, one workspace-tenancy
+#          service later, added 2026-09-01 for Phase 2's catalog-lite.
+# platform-postgres-catalog-credentials is what postgres-cluster.yaml's
+# managed.roles reconciles the `catalog` role's password from, and what a
+# future catalog-service Deployment will read DATABASE_URL out of once one
+# exists (see src/core/catalog-service/README.md's "Not yet built" list —
+# there's no Deployment yet, so this Secret currently has nowhere to mirror
+# TO until that catalog-service namespace exists; Reflector just waits).
+# Idempotent, same as 2d — never rotates an existing credential.
+info "Ensuring the Postgres→catalog-service credential secret exists..."
+if kubectl -n postgres get secret platform-postgres-catalog-credentials >/dev/null 2>&1; then
+  info "platform-postgres-catalog-credentials already exists — leaving it as-is."
+else
+  if command -v openssl >/dev/null 2>&1; then
+    CATALOG_DB_PASSWORD="$(openssl rand -base64 24)"
+  else
+    CATALOG_DB_PASSWORD="$(head -c 24 /dev/urandom | base64)"
+  fi
+  kubectl -n postgres create secret generic platform-postgres-catalog-credentials \
+    --type=kubernetes.io/basic-auth \
+    --from-literal=username=catalog \
+    --from-literal=password="${CATALOG_DB_PASSWORD}"
+  unset CATALOG_DB_PASSWORD
+  kubectl -n postgres annotate secret platform-postgres-catalog-credentials \
+    reflector.v1.k8s.emberstack.com/reflection-allowed=true \
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled=true \
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces=catalog-service \
+    --overwrite
+  success "platform-postgres-catalog-credentials created."
+fi
+
 # ---- 3. Hand Argo CD the core app-of-apps -------------------------------
 # Always applied — apps/core/ is the environment-agnostic half of the
 # platform (see the portability note at the top of this file).
@@ -402,6 +440,48 @@ if [[ "$SKIP_SEAWEEDFS" != true ]]; then
     -e "s|__REVISION__|${REVISION}|g" \
     "${REPO_ROOT}/src/core/argocd/optional/storage-seaweedfs-app.yaml" | kubectl apply -f -
   APPLIED_OPTIONAL+=("storage-seaweedfs")
+fi
+
+# ---- 5. One-time CNPG operator restart for Barman Cloud plugin discovery -
+# See docs/known-issues.md ("CNPG's operator only discovers the Barman Cloud
+# plugin at its own startup") for the full story — short version: the
+# operator enumerates available CNPG-I plugins once, at its own process
+# start, and never again. Argo CD's wave ordering guarantees postgres-operator
+# (wave 0) is already healthy before postgres-backup-plugin (wave 1) is even
+# created, so on a genuinely fresh Postgres/CNPG bring-up the operator
+# reliably starts before the plugin exists — meaning it reliably misses it,
+# every time, without this. Only run this dance when cnpg-system didn't
+# exist before this run (CNPG_SYSTEM_PRE_EXISTED, captured in step 2) — an
+# already-running cluster's operator either already knows about the plugin,
+# or this was already handled by hand; restarting it again on every re-run
+# of this script would just be needless reconciliation churn for no benefit.
+if [[ "$CNPG_SYSTEM_PRE_EXISTED" == true ]]; then
+  info "cnpg-system already existed before this run — skipping the one-time plugin-discovery operator restart."
+elif [[ "$SKIP_K3S" == true ]]; then
+  info "Skipping the plugin-discovery wait+restart against an existing external cluster (--skip-k3s) — do it by hand if Postgres backups ever fail with 'requested plugin is not available' (see docs/known-issues.md)."
+else
+  info "Waiting for the Barman Cloud plugin to come up (up to 5 minutes) so the CNPG operator can be restarted to discover it..."
+  _waited=0
+  until kubectl -n cnpg-system get pods -l app=barman-cloud 2>/dev/null | grep -q '1/1.*Running'; do
+    sleep 5
+    _waited=$((_waited + 5))
+    if [[ $_waited -ge 300 ]]; then
+      break
+    fi
+  done
+  if kubectl -n cnpg-system get pods -l app=barman-cloud 2>/dev/null | grep -q '1/1.*Running'; then
+    info "Barman Cloud plugin is up — restarting the CNPG operator so it discovers it (one-time)..."
+    if kubectl -n cnpg-system get deployment postgres-operator-cloudnative-pg >/dev/null 2>&1; then
+      kubectl -n cnpg-system rollout restart deployment postgres-operator-cloudnative-pg
+      kubectl -n cnpg-system rollout status deployment postgres-operator-cloudnative-pg --timeout=120s \
+        || warn "Operator restart didn't report ready in time — check manually: kubectl -n cnpg-system get pods"
+      success "CNPG operator restarted — Postgres backups should work without the manual fix in docs/known-issues.md."
+    else
+      warn "cnpg-system's operator Deployment not found yet — skipping restart. If Postgres backups later fail with 'requested plugin is not available', see docs/known-issues.md for the one-line fix."
+    fi
+  else
+    warn "Barman Cloud plugin didn't come up within 5 minutes — skipping the operator restart. If Postgres backups later fail with 'requested plugin is not available', see docs/known-issues.md for the one-line fix."
+  fi
 fi
 
 success "Done. Argo CD is reconciling core from ${REPO_URL}@${REVISION}."

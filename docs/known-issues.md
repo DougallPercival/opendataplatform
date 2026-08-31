@@ -316,13 +316,19 @@ already been running for hours (from an earlier, unrelated install step) by the 
 namespaces — isn't what happened here; this repo keeps all three in `postgres` on purpose, see
 `manifests/postgres-backup.yaml`.)
 
-**Status:** worked around, not a bug in anything this repo controls — a one-time gap on whichever
-install first brings the plugin up, same shape as the Keycloak `OnDelete` gotcha above (a
-controller that doesn't react to a change automatically the first time). Deliberately NOT automated
-into `install.sh`: the script hands off to Argo CD and returns immediately, well before a truly
-fresh cluster's `postgres-backup-plugin` would even exist yet to detect — a "restart the operator
-now" step in the script would frequently run too early to help. Fix, the one time it's needed per
-cluster:
+**Status:** not a bug in anything this repo controls — a one-time gap on whichever install first
+brings the plugin up, same shape as the Keycloak `OnDelete` gotcha above (a controller that doesn't
+react to a change automatically the first time). Originally left as a manual step on the theory
+that `install.sh` hands off to Argo CD and returns immediately, well before a truly fresh cluster's
+plugin would even exist — but that reasoning didn't hold up: Argo CD's wave ordering *guarantees*
+`postgres-operator` (wave 0) is already healthy before `postgres-backup-plugin` (wave 1) is even
+created, which makes "operator starts before the plugin exists" the reliable, predictable case on
+every fresh bring-up, not a coin flip. `install.sh` now waits for the plugin (bounded, 5 minutes)
+and restarts the operator automatically as its final step — see its own step 5 comments — skipping
+the wait entirely on a cluster where `cnpg-system` already existed (nothing new to discover) or with
+`--skip-k3s` (an existing external cluster, left to you). Manual fix below still applies to the case
+automation can't cover — adding this capability to an already-running cluster whose operator has
+been up for a while, exactly what happened during testing on 2026-09-01 before this was automated:
 
 ```bash
 kubectl -n cnpg-system rollout restart deployment postgres-operator-cloudnative-pg
@@ -351,6 +357,60 @@ kubectl -n postgres get backups -w
 Safe to restart the operator any time — it briefly pauses reconciliation, it doesn't touch already-
 running Postgres pods. **Only needed once per cluster**, right after `postgres-backup-plugin` first
 goes healthy; the operator remembers the plugin across its own future restarts/upgrades from then on.
+
+### The first (`immediate: true`) backup can fail on a fresh install — SeaweedFS's own startup race
+
+**What happened (2026-09-01), on a fully fresh install with the operator-restart fix above already
+in place:** `postgres-backup`'s `ScheduledBackup` still produced one `failed` `Backup` before its
+very next attempt (2 seconds later, by coincidence of timing) succeeded, and every WAL archive since
+has been clean. The `barman-cloud` sidecar's own logs (`kubectl -n postgres logs platform-postgres-1
+-c plugin-barman-cloud`, NOT the central `barman-cloud` Deployment in `cnpg-system` — that one only
+logs the plugin's pod-patching lifecycle hooks, not actual backup/archive activity) showed the real
+cause: SeaweedFS's S3 gateway returned a genuine `InternalError` on `CreateBucket` for about a
+minute — not "bucket doesn't exist," an actual internal error — meaning SeaweedFS's own
+master/volume/filer components hadn't finished electing/stabilizing yet, even though its pods
+already reported `Running`. One second after that internal error stopped, WAL archiving started
+working and hasn't failed since.
+
+**Status:** benign and self-healing, not a defect — this is "the destination isn't fully warmed up
+in its first minute of existence," a fundamentally different race than the bucket-doesn't-exist-yet
+one `manifests/postgres-backup.yaml`'s bucket-creation Job already retries around. `ScheduledBackup`
+has no automatic retry for a `Backup` that already reached `failed` — only the *next* trigger (the
+real daily 02:00 schedule, or a manual one-off) gets a fresh attempt — which is exactly why this one
+resolved itself within seconds here rather than needing any intervention. Deliberately NOT
+engineered away (e.g. by dropping `immediate: true` or adding an artificial startup delay): the
+point of `immediate: true` is not waiting until 02:00 for your first backup, one cosmetic `failed`
+entry costs nothing functionally, and CNPG's own `ContinuousArchiving`/`LastBackupSucceeded`
+conditions (`kubectl -n postgres get cluster platform-postgres -o jsonpath='{.status.conditions}'`)
+tell you the real, current state regardless of what any one historical `Backup` object says. If a
+fresh install's `ScheduledBackup` fails immediately, check whether it's this — SeaweedFS pods
+`Running` for well under a couple of minutes — before assuming something is actually broken.
+
+### Checking whether backups/WAL archiving are actually working: don't trust `Cluster.status.firstRecoverabilityPoint`
+
+**What happened (2026-09-01):** with backups and WAL archiving both genuinely healthy (confirmed via
+the `Cluster`'s own `ContinuousArchiving`/`LastBackupSucceeded` conditions, both `True`), both
+`kubectl -n postgres get cluster platform-postgres -o jsonpath='{.status.firstRecoverabilityPoint}'`
+and the newer per-method `{.status.firstRecoverabilityPointByMethod}` came back completely empty —
+looking like backups weren't really landing anywhere, despite every other signal saying they were.
+
+**Status:** not a bug, and not specific to this repo — a known reporting gap in how the CNPG core
+operator surfaces plugin-based backup state, matching
+[cloudnative-pg/cloudnative-pg#8276](https://github.com/cloudnative-pg/cloudnative-pg/issues/8276)
+(filed against `kubectl cnpg status`, but the same gap shows up querying the raw `Cluster` status
+directly). With the plugin architecture, this data isn't copied up into `Cluster.status` — it lives
+on the `ObjectStore` resource itself instead:
+
+```bash
+kubectl -n postgres get objectstore platform-postgres-backup-store -o jsonpath='{.status.serverRecoveryWindow}'
+```
+
+That's the field that's actually authoritative for a plugin-backed cluster —
+`firstRecoverabilityPoint`, `lastSuccessfulBackupTime`, and `lastFailedBackupTime` all live there,
+confirmed accurate against real backup activity during testing. Check this (or the `Cluster`'s
+`ContinuousArchiving`/`LastBackupSucceeded` conditions) instead of `Cluster.status.
+firstRecoverabilityPoint` on this repo's Postgres setup, now and until CNPG's core operator starts
+populating the top-level field for plugin-based backups too.
 
 ### Reaching Keycloak (or anything with a pinned `hostname`) by raw IP breaks after the first page
 
@@ -381,6 +441,23 @@ applies on the one machine whose hosts file you edited. Once `platform-gateway` 
 `Ingress` exist, `keycloak.platform.local` is meant to resolve to ingress-nginx's IP
 (`192.168.4.240`, from `metallb-pool.yaml`) instead of the homelab box's own address — update or
 remove this entry at that point rather than leaving it pointed at the wrong place.
+
+### `catalog-service`'s auth is a placeholder — don't expose it past the cluster boundary yet
+
+Added 2026-09-01, Phase 2 kickoff. `src/core/catalog-service/app/deps.py`'s `get_current_principal`
+trusts two plain headers (`X-Workspace`, `X-User`) with no verification at all — anyone who can
+reach the service can claim to be any workspace, as any user, and read/write accordingly. This
+isn't a bug to fix in that file; it's an intentionally deferred seam. Real auth is
+`platform-gateway`'s job once it exists and proxies here (see that module's own README and
+`catalog-service/app/deps.py`'s docstring for the intended shape — gateway verifies the Keycloak
+JWT once, the way it already will for every other module per ARCHITECTURE.md §3, and forwards the
+verified identity downstream as trusted headers this same function keeps reading).
+
+**Status:** not a bug, a documented gap. **Do not** put `catalog-service` behind an `Ingress`, a
+`LoadBalancer` Service, or anything else reachable off-cluster before `platform-gateway` sits in
+front of it — today it's only meant to be reached from inside the cluster (or `localhost` during
+local dev, per its own README), where "anyone who can reach it" is a much smaller set of things
+than "anyone on your network."
 
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 

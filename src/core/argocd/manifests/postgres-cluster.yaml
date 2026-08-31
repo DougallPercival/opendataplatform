@@ -38,6 +38,17 @@
 # itself. Originally going to be MinIO (per ARCHITECTURE.md's original text);
 # swapped for SeaweedFS before ever being built — MinIO's Community Edition
 # was archived upstream Feb 13, 2026, see docs/known-issues.md.
+#
+# managed.roles' `catalog` entry (added 2026-09-01, Phase 2 kickoff) is the
+# same pattern as `keycloak` one line down: a role whose password is
+# reconciled on an ongoing basis from a Secret bootstrap/install.sh generates
+# once (platform-postgres-catalog-credentials, this `postgres` namespace,
+# never committed), mirrored into `catalog-service` by Reflector. The
+# `catalog` DATABASE itself (owned by this role) is declared separately —
+# see catalog-database.yaml, using CNPG's Database CRD rather than a
+# CREATE-DATABASE Job, since bootstrap.initdb only ever runs once per
+# Cluster and this operator (1.30) has had declarative Database support
+# since 1.24.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -59,6 +70,11 @@ spec:
         login: true
         passwordSecret:
           name: platform-postgres-keycloak-credentials
+      - name: catalog
+        ensure: present
+        login: true
+        passwordSecret:
+          name: platform-postgres-catalog-credentials
   # Continuous WAL archiving to the ObjectStore in postgres-backup.yaml — the
   # plugin itself (postgres-backup-plugin.yaml) has to be running for this to
   # actually work, but the Cluster tolerates it not being ready yet the same
