@@ -9,6 +9,16 @@
 # knows how to talk to S3-compatible object storage, same shape everywhere.
 # What differs by environment is WHERE it points (manifests/postgres-backup.yaml's
 # ObjectStore), not whether this plugin itself is installed.
+#
+# One-time gotcha confirmed in testing (2026-09-01), not a bug in this repo:
+# the CNPG operator only enumerates available plugins at its OWN startup, not
+# continuously — if postgres-operator was already running before this app
+# first syncs (its usual case, since postgres-operator is wave 0 and comes up
+# well before this wave-1 app does), backups fail with "requested plugin is
+# not available" until the operator is restarted once:
+# `kubectl -n cnpg-system rollout restart deployment postgres-operator-cloudnative-pg`.
+# See docs/known-issues.md for the full writeup — only needed once per
+# cluster; the operator remembers the plugin across its own future restarts.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

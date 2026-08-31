@@ -298,6 +298,60 @@ started successfully, so there was no session/data state on it to lose. **Any fu
 on the `platform` `StatefulSet` if a CR change syncs clean but the pod doesn't visibly react, and
 delete the pod by hand if it's `OnDelete`.
 
+### CNPG's operator only discovers the Barman Cloud plugin at its own startup
+
+**What happened (2026-09-01):** `postgres-backup-plugin`, `postgres-backup`, and `storage-seaweedfs`
+all synced Healthy — the `barman-cloud` pod in `cnpg-system` was `Running`, the S3 bucket existed
+(confirmed via its own Job's logs), the `ObjectStore` existed — and the first `ScheduledBackup` run
+still failed immediately: `requested plugin is not available: barman-cloud.cloudnative-pg.io`.
+Every piece this repo is responsible for was correctly in place; the CNPG operator itself just
+didn't know the plugin existed yet. Matching reports on the plugin's own repo
+([#196](https://github.com/cloudnative-pg/plugin-barman-cloud/issues/196),
+[#660](https://github.com/cloudnative-pg/plugin-barman-cloud/issues/660)) point at the actual
+mechanism: the operator enumerates available CNPG-I plugins once, at its own process startup — it
+doesn't keep watching for new plugin Services to appear afterward. Our `postgres-operator` pod had
+already been running for hours (from an earlier, unrelated install step) by the time
+`postgres-backup-plugin` first synced, so it never saw the new `barman-cloud` Service come up. (The
+*other* cause reported in that thread — Cluster/ObjectStore/Secret split across different
+namespaces — isn't what happened here; this repo keeps all three in `postgres` on purpose, see
+`manifests/postgres-backup.yaml`.)
+
+**Status:** worked around, not a bug in anything this repo controls — a one-time gap on whichever
+install first brings the plugin up, same shape as the Keycloak `OnDelete` gotcha above (a
+controller that doesn't react to a change automatically the first time). Deliberately NOT automated
+into `install.sh`: the script hands off to Argo CD and returns immediately, well before a truly
+fresh cluster's `postgres-backup-plugin` would even exist yet to detect — a "restart the operator
+now" step in the script would frequently run too early to help. Fix, the one time it's needed per
+cluster:
+
+```bash
+kubectl -n cnpg-system rollout restart deployment postgres-operator-cloudnative-pg
+kubectl -n cnpg-system rollout status deployment postgres-operator-cloudnative-pg
+```
+
+Then either wait for the next scheduled run or trigger one by hand to confirm:
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: postgresql.cnpg.io/v1
+kind: Backup
+metadata:
+  name: platform-postgres-manual-test
+  namespace: postgres
+spec:
+  cluster:
+    name: platform-postgres
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+EOF
+kubectl -n postgres get backups -w
+```
+
+Safe to restart the operator any time — it briefly pauses reconciliation, it doesn't touch already-
+running Postgres pods. **Only needed once per cluster**, right after `postgres-backup-plugin` first
+goes healthy; the operator remembers the plugin across its own future restarts/upgrades from then on.
+
 ### Reaching Keycloak (or anything with a pinned `hostname`) by raw IP breaks after the first page
 
 **What happened (2026-08-31):** port-forwarded to `platform-service` and connected fine via
