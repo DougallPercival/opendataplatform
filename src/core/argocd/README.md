@@ -15,6 +15,7 @@ install in the right order and wait for the previous wave to go healthy first:
 | 0 | cert-manager, sealed-secrets, reflector, postgres-operator | Foundational, no cross-dependencies |
 | 1 | cert-manager-issuers, ingress-nginx, keycloak-operator, postgres-cluster | Each needs its wave-0 counterpart's CRDs/controller healthy first — issuers need cert-manager's CRDs, the Postgres Cluster CR needs the operator's CRDs |
 | 2 | keycloak-instance, monitoring | Needs its own operator's CRDs (wave 1) AND postgres-cluster (also wave 1) to exist first |
+| 3 | keycloak-realm | Seeds the workspace-group model (`../auth/realm-platform.yaml`) via a `KeycloakRealmImport` Job against the live admin API — needs the actual `Keycloak` instance (wave 2) running, not just applied |
 
 `apps/optional/<capability>/*.yaml` follow the same wave numbering independently within their own
 capability — MetalLB's controller (wave 0) and its IP pool config (wave 1) still need to install in
@@ -87,15 +88,15 @@ Every other `Application` in this folder is read straight from GitHub *by Argo C
 `root` starts reconciling — there's no script in the loop, and Argo CD has no templating
 mechanism for a plain `directory:`-sourced Application. So any Application manifest in here that
 points back at this same repo (`postgres-cluster`, `cert-manager-issuers`, `metallb-config`,
-`keycloak-instance` — the ones sourcing `manifests/*.yaml` from this repo, as opposed to an
-external chart) has to use a real, literal `repoURL`/`targetRevision`, not a placeholder. A
-placeholder left in one of these isn't "filled in later" the way it is in `root-app.yaml` — it's
-a permanently broken source that Argo CD can never resolve, and it fails silently as a stuck
-`Unknown` sync status with no obvious symptom pointing at the cause (this bit us in testing —
-see `docs/known-issues.md`).
+`keycloak-instance`, `keycloak-realm` — the ones sourcing `manifests/*.yaml` or `../auth/*.yaml`
+from this repo, as opposed to an external chart) has to use a real, literal
+`repoURL`/`targetRevision`, not a placeholder. A placeholder left in one of these isn't "filled in
+later" the way it is in `root-app.yaml` — it's a permanently broken source that Argo CD can never
+resolve, and it fails silently as a stuck `Unknown` sync status with no obvious symptom pointing at
+the cause (this bit us in testing — see `docs/known-issues.md`).
 
-Current convention: these four hardcode `repoURL: git@github.com:DougallPercival/opendataplatform.git`
+Current convention: these five hardcode `repoURL: git@github.com:DougallPercival/opendataplatform.git`
 and `targetRevision: dev`. If you deliberately bootstrap from a different branch (a feature branch,
-say, for isolated testing), `root` itself will track it fine via `--revision`, but these four will
+say, for isolated testing), `root` itself will track it fine via `--revision`, but these five will
 keep tracking `dev` until you update them by hand — a known, accepted limitation of this pattern
 rather than something `install.sh` can fix for you.
