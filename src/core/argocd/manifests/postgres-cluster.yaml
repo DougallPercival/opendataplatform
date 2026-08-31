@@ -32,10 +32,12 @@
 # how the role was originally created, so this works whether the cluster is
 # brand new or (like this one) already past its initial bootstrap.
 #
-# Not wired up yet: WAL archiving to MinIO (ARCHITECTURE.md §8's actual backup
-# story). MinIO doesn't exist in this repo yet either — Phase 1. Revisit once
-# it does; a single-instance, unbacked-up Postgres is fine for getting Keycloak
-# running, not fine to leave that way long-term.
+# spec.plugins below wires up WAL archiving + scheduled backups (ARCHITECTURE.md
+# §8's actual backup story, added 2026-08-31) — see postgres-backup.yaml for
+# the ObjectStore it points at and postgres-backup-plugin.yaml for the plugin
+# itself. Originally going to be MinIO (per ARCHITECTURE.md's original text);
+# swapped for SeaweedFS before ever being built — MinIO's Community Edition
+# was archived upstream Feb 13, 2026, see docs/known-issues.md.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -57,3 +59,16 @@ spec:
         login: true
         passwordSecret:
           name: platform-postgres-keycloak-credentials
+  # Continuous WAL archiving to the ObjectStore in postgres-backup.yaml — the
+  # plugin itself (postgres-backup-plugin.yaml) has to be running for this to
+  # actually work, but the Cluster tolerates it not being ready yet the same
+  # way keycloak-instance.yaml tolerates Postgres not being ready yet:
+  # degraded/retrying until the dependency catches up, not a hard failure.
+  # Periodic full backups are a separate ScheduledBackup, also in
+  # postgres-backup.yaml — WAL archiving alone isn't a complete backup story,
+  # it needs a base backup to replay forward from.
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: platform-postgres-backup-store

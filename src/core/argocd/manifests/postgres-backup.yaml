@@ -1,0 +1,142 @@
+# Closes the "Not wired up yet: WAL archiving to MinIO" TODO that's been
+# sitting in postgres-cluster.yaml since Phase 0 — MinIO's Community Edition
+# was archived upstream Feb 13, 2026 (see docs/known-issues.md and
+# ARCHITECTURE.md §2), so this repo uses SeaweedFS instead
+# (apps/optional/storage-seaweedfs/) as the in-cluster S3-compatible object
+# store, or a real external S3-compatible endpoint if --skip-seaweedfs was
+# used at install time. Whichever it is, this file is what actually points
+# Postgres's backups at it.
+#
+# TODO before this goes healthy — same class of "values specific to your
+# environment" as manifests/metallb-pool.yaml's CIDR or cluster-issuer.yaml's
+# ACME email, not a bug:
+#   1. Confirm the real Service name/port SeaweedFS's S3 gateway landed on —
+#      `kubectl -n storage-seaweedfs get svc` once apps/optional/storage-seaweedfs
+#      has synced — and update `endpointURL` below to match if it differs from
+#      the placeholder. (Skip this if you used --skip-seaweedfs — endpointURL
+#      should already be your real external S3-compatible endpoint in that
+#      case; bootstrap/install.sh doesn't template this file, see its own
+#      comments on why.)
+#   2. Nothing else needs editing — bucket name, credentials, and region are
+#      already wired to what install.sh generates/asks for.
+#
+# Two resources from the Barman Cloud plugin's CRD (see
+# plugin-barman-cloud.yaml) plus one plain Job:
+#   - ObjectStore: where backups go. Referenced by postgres-cluster.yaml's
+#     spec.plugins (continuous WAL archiving) AND by the ScheduledBackup below
+#     (periodic full base backups) — ARCHITECTURE.md §8's "not just nightly
+#     snapshots" backup story, now actually wired up.
+#   - ScheduledBackup: barman-cloud does WAL archiving continuously once the
+#     Cluster references the plugin, but a periodic full base backup still
+#     needs its own schedule — this is that schedule (daily at 02:00).
+#   - Job: the bucket itself needs to exist before barman-cloud's first write
+#     — CNPG's own docs are explicit that it does NOT create the bucket for
+#     you. Idempotent (checks before creating) and retries for a while in
+#     case it runs before SeaweedFS's S3 gateway is actually up yet — same
+#     "eventual consistency, don't assume perfect ordering across separate
+#     Argo CD app-of-apps trees" reasoning as keycloak-realm.yaml's own
+#     comments. Safe to re-run (Argo CD won't re-trigger it on every sync
+#     once it's completed, only if this manifest itself changes).
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: platform-postgres-backup-store
+  namespace: postgres
+spec:
+  configuration:
+    destinationPath: "s3://platform-postgres-backups/"
+    endpointURL: "http://storage-seaweedfs-s3.storage-seaweedfs.svc.cluster.local:8333"   # TODO: confirm — see header
+    s3Credentials:
+      accessKeyId:
+        name: platform-s3-credentials
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: platform-s3-credentials
+        key: ACCESS_SECRET_KEY
+      region:
+        name: platform-s3-credentials
+        key: REGION
+    wal:
+      compression: gzip
+      maxParallel: 2
+    data:
+      compression: gzip
+  retentionPolicy: "30d"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: platform-postgres-daily
+  namespace: postgres
+spec:
+  schedule: "0 0 2 * * *"   # six-field (includes seconds): daily at 02:00
+  backupOwnerReference: self
+  cluster:
+    name: platform-postgres
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+  immediate: true    # also take one right away, don't wait for the first 02:00
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: platform-postgres-backup-bucket
+  namespace: postgres
+  annotations:
+    # Re-run if this manifest changes (e.g. bucket name), not on every sync —
+    # Jobs are immutable once created, so a plain re-apply of an unchanged
+    # Job is a no-op; this just makes an intentional edit here take effect
+    # instead of silently applying to a field Kubernetes then rejects.
+    argocd.argoproj.io/sync-options: Replace=true
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          image: amazon/aws-cli:2.27.0   # check for newer: https://github.com/aws/aws-cli/releases — pinned since this is generic tooling, not project-specific
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: platform-s3-credentials
+                  key: ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: platform-s3-credentials
+                  key: ACCESS_SECRET_KEY
+            - name: AWS_DEFAULT_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: platform-s3-credentials
+                  key: REGION
+            - name: S3_ENDPOINT
+              value: "http://storage-seaweedfs-s3.storage-seaweedfs.svc.cluster.local:8333"   # TODO: keep in sync with the ObjectStore's endpointURL above
+            - name: BUCKET
+              value: "platform-postgres-backups"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              echo "Waiting for ${S3_ENDPOINT} to accept connections (up to 10 minutes — normal on a fresh install while SeaweedFS is still starting)..."
+              for i in $(seq 1 60); do
+                if aws --endpoint-url="${S3_ENDPOINT}" s3 ls >/dev/null 2>&1; then
+                  echo "S3 endpoint reachable."
+                  break
+                fi
+                if [[ "$i" -eq 60 ]]; then
+                  echo "Gave up waiting for ${S3_ENDPOINT} after 10 minutes." >&2
+                  exit 1
+                fi
+                sleep 10
+              done
+              if aws --endpoint-url="${S3_ENDPOINT}" s3api head-bucket --bucket "${BUCKET}" 2>/dev/null; then
+                echo "Bucket ${BUCKET} already exists."
+              else
+                echo "Creating bucket ${BUCKET}..."
+                aws --endpoint-url="${S3_ENDPOINT}" s3 mb "s3://${BUCKET}"
+              fi

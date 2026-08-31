@@ -34,9 +34,10 @@ if kubectl get namespace argocd >/dev/null 2>&1; then
     || warn "Timed out deleting core-tier Applications — continuing anyway (k3s-uninstall.sh below wipes the node regardless)."
 
   # platform.io/tier=optional catches whichever of metallb/metallb-config/
-  # storage-longhorn actually got applied (see src/core/argocd/README.md's
-  # "Portability" section — install.sh only applies the ones its flags asked
-  # for, so this is a no-op for whichever weren't).
+  # storage-longhorn/storage-seaweedfs actually got applied (see
+  # src/core/argocd/README.md's "Portability" section — install.sh only
+  # applies the ones its flags asked for, so this is a no-op for whichever
+  # weren't).
   info "Deleting optional-capability Applications (if any)..."
   kubectl delete applications -n argocd -l platform.io/tier=optional --ignore-not-found --timeout=60s \
     || warn "Timed out deleting optional-tier Applications — continuing anyway (k3s-uninstall.sh below wipes the node regardless)."
@@ -53,9 +54,9 @@ if kubectl get namespace argocd >/dev/null 2>&1; then
   # doesn't finish in time, force it through: we're about to wipe the whole
   # node with k3s-uninstall.sh anyway, so nothing is lost by dropping the
   # finalizer rather than tracking down why the cascade got stuck. Only
-  # root is guaranteed to exist — the other two are only present if their
+  # root is guaranteed to exist — the others are only present if their
   # capability was ever applied, hence --ignore-not-found.
-  for root_app in root optional-metallb optional-storage-longhorn; do
+  for root_app in root optional-metallb optional-storage-longhorn optional-storage-seaweedfs; do
     if ! kubectl get application "$root_app" -n argocd >/dev/null 2>&1; then
       continue
     fi

@@ -6,6 +6,27 @@ not design. First target: RHEL/Rocky/AlmaLinux 9. Add to this as new hosts turn 
 
 ## Still on you — host-level decisions a script shouldn't make for you
 
+### `postgres-backup.yaml`'s ObjectStore endpoint — confirm it after SeaweedFS syncs
+
+Added 2026-08-31 alongside SeaweedFS/Postgres backup wiring. `manifests/postgres-backup.yaml`'s
+`ObjectStore.spec.configuration.endpointURL` ships with a best-guess Service DNS name for
+SeaweedFS's S3 gateway (`storage-seaweedfs-s3.storage-seaweedfs.svc.cluster.local:8333`) — the
+Helm chart's exact generated Service name depends on its `_helpers.tpl` fullname template, which
+wasn't worth vendoring the whole chart locally just to confirm ahead of a real sync. Same class of
+"can't be known until it actually runs on your cluster" as MetalLB's pool below, not a bug.
+
+**Fix:** once `apps/optional/storage-seaweedfs` has synced, confirm the real name —
+
+```bash
+kubectl -n storage-seaweedfs get svc
+```
+
+— and update `endpointURL` in both `manifests/postgres-backup.yaml` (the `ObjectStore`) and the
+`S3_ENDPOINT` env var on the bucket-creation `Job` in that same file if it differs from the
+placeholder. Until this is confirmed, `postgres-backup` and `postgres-cluster`'s WAL archiving will
+sit Degraded/erroring — same "commit a TODO'd default, Argo CD shows it degraded until addressed"
+pattern as `metallb-pool.yaml`/`cluster-issuer.yaml` below, and expected on a fresh install.
+
 ### MetalLB's IP pool is network-specific — update it on any new host/network
 
 `src/core/argocd/manifests/metallb-pool.yaml` is committed with a real, concrete IP range
@@ -276,6 +297,36 @@ started successfully, so there was no session/data state on it to lose. **Any fu
 `keycloak-instance.yaml`'s `Keycloak` CR will hit this same gap** — check `spec.updateStrategy.type`
 on the `platform` `StatefulSet` if a CR change syncs clean but the pod doesn't visibly react, and
 delete the pod by hand if it's `OnDelete`.
+
+### Reaching Keycloak (or anything with a pinned `hostname`) by raw IP breaks after the first page
+
+**What happened (2026-08-31):** port-forwarded to `platform-service` and connected fine via
+`https://<homelab-IP>:8443` — the login page loaded — but everything broke immediately after
+(submitting the login form, loading the admin console). `keycloak-instance.yaml`'s `Keycloak` CR
+pins `spec.hostname.hostname: keycloak.platform.local`, and Keycloak's hostname provider enforces
+that value strictly for every URL it generates once you're past the first static page — form
+actions, redirects, the admin console's own asset URLs all point at `keycloak.platform.local`
+regardless of what address the browser actually used to connect. A browser that can't resolve that
+name has no way to follow them.
+
+**Status:** worked around, not a bug — this is Keycloak (and `hostname`-pinned services generally)
+behaving as configured, not a defect. Fix: make the configured hostname actually resolve, rather
+than trying to bypass it. On whichever machine's browser you're using, add a line to its hosts file
+— `C:\Windows\System32\drivers\etc\hosts` on Windows (Notepad "Run as administrator" to save it),
+`/etc/hosts` on Linux/macOS — pointing the configured hostname at wherever you're actually reaching
+the service:
+
+```text
+192.168.4.129 keycloak.platform.local
+```
+
+Then browse to `https://keycloak.platform.local:8443`, not the raw IP. This is a temporary,
+per-machine, testing-only mapping — it doesn't affect anything else at that IP (hosts entries only
+add name→IP resolution, they don't restrict or remove existing IP-based access), and it only
+applies on the one machine whose hosts file you edited. Once `platform-gateway` and a real
+`Ingress` exist, `keycloak.platform.local` is meant to resolve to ingress-nginx's IP
+(`192.168.4.240`, from `metallb-pool.yaml`) instead of the homelab box's own address — update or
+remove this entry at that point rather than leaving it pointed at the wrong place.
 
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 

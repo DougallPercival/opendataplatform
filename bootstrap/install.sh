@@ -44,6 +44,9 @@ REPO_SSH_KEY=""
 SKIP_ISCSI=false
 SKIP_METALLB=false
 ENABLE_LONGHORN=false
+SKIP_SEAWEEDFS=false
+S3_ENDPOINT=""
+S3_REGION="us-east-1"
 
 usage() {
   cat <<EOF
@@ -77,7 +80,28 @@ Usage: bootstrap/install.sh [options]
                         useful on a managed/cloud node where you don't want this script running
                         dnf/apt as root on your behalf, or if you'll manage iscsid yourself. Has
                         no effect without --enable-longhorn (see docs/known-issues.md).
+  --skip-seaweedfs      Don't deploy SeaweedFS (src/core/argocd/apps/optional/storage-seaweedfs/)
+                        — for any environment with real S3-compatible object storage already
+                        available (cloud S3/R2/B2/etc.). Requires --s3-endpoint, plus
+                        S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY set as environment variables
+                        (deliberately not flags — see below) pointing at that real endpoint.
+                        Default: SeaweedFS IS deployed — the common case for a homelab/self-hosted
+                        box with no object storage underneath it already. Either way, Postgres's
+                        WAL-archiving backups (manifests/postgres-backup.yaml) end up pointed at
+                        whichever one this run set up.
+  --s3-endpoint <url>   Only used with --skip-seaweedfs. The external S3-compatible endpoint to
+                        point Postgres's backups at (e.g. https://s3.us-west-002.backblazeb2.com).
+  --s3-region <region>  Region value to record alongside the S3 credentials (default: us-east-1 —
+                        a harmless placeholder when the endpoint doesn't use real AWS regions,
+                        like SeaweedFS; set a real one for an external endpoint that checks it).
   -h, --help            Show this help
+
+S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY (environment variables, only read with --skip-seaweedfs):
+credentials for the external endpoint --s3-endpoint points at. Passed as env vars rather than
+flags on purpose — a flag value is visible in shell history and process listings
+(ps/'kubectl get pods -o yaml' for anything that echoes its own args), an env var passed inline
+on the command that invokes this script isn't recorded either place. Example:
+  S3_ACCESS_KEY_ID=... S3_SECRET_ACCESS_KEY=... sudo -E bash bootstrap/install.sh --skip-seaweedfs --s3-endpoint https://...
 
 Phase 0 gets you: k3s, Argo CD, and the app-of-apps handoff (core + whichever optional
 capabilities you asked for). See src/core/argocd/README.md's "Portability" section for the full
@@ -96,6 +120,9 @@ while [[ $# -gt 0 ]]; do
     --skip-iscsi) SKIP_ISCSI=true; shift ;;
     --skip-metallb) SKIP_METALLB=true; shift ;;
     --enable-longhorn) ENABLE_LONGHORN=true; shift ;;
+    --skip-seaweedfs) SKIP_SEAWEEDFS=true; shift ;;
+    --s3-endpoint) S3_ENDPOINT="$2"; shift 2 ;;
+    --s3-region) S3_REGION="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
   esac
@@ -287,6 +314,57 @@ else
   success "platform-postgres-keycloak-credentials created."
 fi
 
+# ---- 2e. S3-compatible object storage credentials -----------------------
+# manifests/postgres-backup.yaml's ObjectStore (Postgres WAL archiving +
+# scheduled backups, ARCHITECTURE.md §8) and, when deployed, apps/optional/
+# storage-seaweedfs/'s S3 gateway both read from this one Secret
+# (platform-s3-credentials). Two modes, same as the Longhorn/MetalLB flags:
+# generate one in-cluster by default (SeaweedFS), or build one from a real
+# external endpoint you already have (--skip-seaweedfs). Idempotent like 2d
+# — never rotates an existing credential out from under a running deployment.
+info "Ensuring the S3 object-storage credential secret exists..."
+if [[ "$SKIP_SEAWEEDFS" == true ]]; then
+  [[ -n "$S3_ENDPOINT" ]] || die "--skip-seaweedfs requires --s3-endpoint (see --help)."
+  [[ -n "${S3_ACCESS_KEY_ID:-}" && -n "${S3_SECRET_ACCESS_KEY:-}" ]] || \
+    die "--skip-seaweedfs requires S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY set as environment variables (see --help)."
+  info "Using external S3-compatible endpoint: ${S3_ENDPOINT}"
+  if kubectl -n postgres get secret platform-s3-credentials >/dev/null 2>&1; then
+    info "platform-s3-credentials already exists in postgres — leaving it as-is."
+  else
+    kubectl -n postgres create secret generic platform-s3-credentials \
+      --from-literal=ACCESS_KEY_ID="${S3_ACCESS_KEY_ID}" \
+      --from-literal=ACCESS_SECRET_KEY="${S3_SECRET_ACCESS_KEY}" \
+      --from-literal=REGION="${S3_REGION}"
+    success "platform-s3-credentials created (external endpoint)."
+  fi
+  warn "manifests/postgres-backup.yaml's ObjectStore ships with SeaweedFS's in-cluster endpointURL committed as the default — update it to ${S3_ENDPOINT} by hand (see that file's own TODO) before backups will actually reach your external endpoint."
+else
+  kubectl create namespace storage-seaweedfs --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  if kubectl -n storage-seaweedfs get secret platform-s3-credentials >/dev/null 2>&1; then
+    info "platform-s3-credentials already exists in storage-seaweedfs — leaving it as-is."
+  else
+    if command -v openssl >/dev/null 2>&1; then
+      S3_SECRET_KEY="$(openssl rand -base64 30)"
+    else
+      S3_SECRET_KEY="$(head -c 30 /dev/urandom | base64)"
+    fi
+    kubectl -n storage-seaweedfs create secret generic platform-s3-credentials \
+      --from-literal=ACCESS_KEY_ID="platform" \
+      --from-literal=ACCESS_SECRET_KEY="${S3_SECRET_KEY}" \
+      --from-literal=REGION="${S3_REGION}"
+    unset S3_SECRET_KEY
+    # Mirror into postgres — CNPG's ObjectStore and the bucket-creation Job
+    # (both in manifests/postgres-backup.yaml) need it there too. Same
+    # Reflector mechanism as 2d.
+    kubectl -n storage-seaweedfs annotate secret platform-s3-credentials \
+      reflector.v1.k8s.emberstack.com/reflection-allowed=true \
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled=true \
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces=postgres \
+      --overwrite
+    success "platform-s3-credentials created (in-cluster SeaweedFS)."
+  fi
+fi
+
 # ---- 3. Hand Argo CD the core app-of-apps -------------------------------
 # Always applied — apps/core/ is the environment-agnostic half of the
 # platform (see the portability note at the top of this file).
@@ -317,12 +395,20 @@ if [[ "$ENABLE_LONGHORN" == true ]]; then
     "${REPO_ROOT}/src/core/argocd/optional/storage-longhorn-app.yaml" | kubectl apply -f -
   APPLIED_OPTIONAL+=("storage-longhorn")
 fi
+if [[ "$SKIP_SEAWEEDFS" != true ]]; then
+  info "Applying optional capability: SeaweedFS (src/core/argocd/apps/optional/storage-seaweedfs)..."
+  sed \
+    -e "s|__REPO_URL__|${REPO_URL}|g" \
+    -e "s|__REVISION__|${REVISION}|g" \
+    "${REPO_ROOT}/src/core/argocd/optional/storage-seaweedfs-app.yaml" | kubectl apply -f -
+  APPLIED_OPTIONAL+=("storage-seaweedfs")
+fi
 
 success "Done. Argo CD is reconciling core from ${REPO_URL}@${REVISION}."
 if [[ ${#APPLIED_OPTIONAL[@]} -gt 0 ]]; then
   success "Optional capabilities applied: ${APPLIED_OPTIONAL[*]}"
 else
-  info "No optional capabilities applied (--skip-metallb was set, --enable-longhorn wasn't) — core only."
+  info "No optional capabilities applied (--skip-metallb, --enable-longhorn's default, --skip-seaweedfs) — core only."
 fi
 echo ""
 echo "  Watch it sync:   kubectl get applications -n argocd -w"
@@ -334,3 +420,4 @@ if [[ "$SKIP_METALLB" != true ]]; then
   echo "   - MetalLB's IP address pool (your actual LAN/cloud subnet)"
 fi
 echo "   - cert-manager's ClusterIssuer (ships self-signed by default)"
+echo "   - postgres-backup.yaml's ObjectStore endpointURL (confirm SeaweedFS's real Service name/port once it's synced, or your external endpoint if --skip-seaweedfs)"

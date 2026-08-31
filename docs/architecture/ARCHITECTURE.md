@@ -35,10 +35,22 @@ Unified nav built from module manifests, catalog browser, pipeline & run status,
 | 7 | Analytical & Serving | Where you actually look at things — notebooks for exploration, small apps for "give me this week's bets," BI for everything else. | JupyterHub `module` · Streamlit `module` · Superset `module` · MLflow `module` |
 | 6 | Compute | Spun up per job, torn down after. Spark when a job genuinely needs distributed shuffle; Dask/Ray when it's Python-native parallelism — which covers most of your three use cases. | Spark (Kubernetes Operator) `module` · Dask / Ray `module` |
 | 5 | Orchestration | DAGs for ingestion, transforms, scoring. Asset-centric so a "pipeline" and a "catalog entry" are the same concept. | Dagster `module` · Argo Workflows (k8s-native fallback) `module` |
-| 4 | Query & Virtualization | Your Denodo analog — one SQL surface federated across Postgres, MinIO/Iceberg, and anything else with a connector, without copying data around. | Trino `module` · dbt `module` |
+| 4 | Query & Virtualization | Your Denodo analog — one SQL surface federated across Postgres, SeaweedFS/Iceberg, and anything else with a connector, without copying data around. | Trino `module` · dbt `module` |
 | 3 | Catalog & Shared Code | The registry that makes datasets, functions, pipelines, and models discoverable — this is your Unity Catalog. Every entry carries a workspace + visibility flag. The shared-code repo stops you rewriting the same Reddit scraper three times. | catalog-lite service `core` · platform-sdk `core` · platform-cli `core` · Gitea/GitHub `module` |
-| 2 | Storage | One object store as the lake, one relational store for anything transactional or small. Table format is optional until you need time travel or schema evolution. | MinIO `core` · Postgres (CloudNativePG) `core` · Iceberg `module` · Redis `module` |
+| 2 | Storage | One object store as the lake, one relational store for anything transactional or small. Table format is optional until you need time travel or schema evolution. | SeaweedFS `core` · Postgres (CloudNativePG) `core` · Iceberg `module` · Redis `module` |
 | 1 | Infrastructure | The boring bedrock everything else assumes exists, including the workspace/group model in Keycloak and the GitOps engine that installs everything above this layer. Get this reliable before anything else. | k3s `core` · MetalLB `core` · ingress-nginx `core` · cert-manager `core` · Longhorn/NFS `core` · Keycloak `core` · Argo CD `core` · sealed-secrets/Vault `core` · Prometheus+Grafana+Loki `module` |
+
+> **SeaweedFS, not MinIO (updated 2026-08-31).** This doc originally specified MinIO for layer 2 —
+> swapped for SeaweedFS before it was ever built, because MinIO's Community Edition was archived
+> upstream Feb 13, 2026 (paid features carved out of the console mid-2025, maintenance mode Dec
+> 2025, `minio/minio` archived Feb 2026), with the company steering everyone toward its commercial
+> "AIStor" product instead. SeaweedFS was picked over the other self-hosted options considered
+> (Garage; pinning an unmaintained MinIO image) for having an official Helm chart maintained by the
+> project itself and being light enough for a single homelab node. Same S3 API surface either way —
+> nothing above this layer (§4's Trino federation, §9's `s3://bronze/...` landing paths) had to
+> change, and `endpointURL`-style config means a real cloud S3/R2/B2/etc. bucket is a straight swap
+> too, not a rewrite. See `src/core/argocd/apps/optional/storage-seaweedfs/seaweedfs.yaml` in the
+> repo for the actual deployment and `docs/known-issues.md` for the operational fallout.
 
 ---
 
@@ -104,7 +116,7 @@ A workspace is a label that four other systems key off of, so isolation is enfor
 |---|---|
 | Keycloak group | Membership + role (owner / editor / viewer), enforced by SSO everywhere, not per-app |
 | k8s namespace | Resource quotas, network policy, RBAC — a runaway Spark job in one workspace can't starve another |
-| MinIO bucket prefix | `s3://lake/<workspace>/...` with bucket policy scoped per prefix |
+| SeaweedFS bucket prefix | `s3://lake/<workspace>/...` with bucket policy scoped per prefix |
 | Postgres schema | `<workspace>.*` tables, one database role per workspace |
 
 The catalog carries a `workspace_id` and a visibility flag (`private` / `workspace` / `public`) on every dataset, function, pipeline, and model — that's the whole mechanism for "my Reddit sentiment tweak is mine, but the platform-sdk connector everyone uses is public." JupyterHub already spawns per-user pods natively; the addition is a KubeSpawner profile list keyed to workspace membership, so a notebook launches with the right storage mounts and quota without anyone picking anything by hand. Dagster's code locations get the same treatment — a workspace's pipelines are their own code location, visible to its members, not one shared blob of DAGs.
@@ -122,7 +134,7 @@ That's public *within your instance*. A different question — publishing a func
 Every one of your three use cases has a different rhythm — stocks want to run continuously, NFL wants a weekly cadence, March Madness wants to run once, fast, on demand. Dagster (§2, layer 5) covers all three with its built-in primitives, so scheduling isn't a separate system bolted on top of orchestration — it's a property of how a pipeline is defined.
 
 - **Cron schedules** — a `ScheduleDefinition` on a job: the stocks ingestion pipeline runs nightly after market close; the NFL pull runs every Tuesday morning once the prior week's games are final.
-- **Sensors** — event-driven, not time-driven: an asset sensor fires the stocks transform the moment a new file lands in `minio://bronze/stocks/`, instead of waiting for a fixed clock time. A freshness policy can flag a dataset that hasn't been updated when it should have been — useful for catching a silently-broken API key before the dashboard just looks stale.
+- **Sensors** — event-driven, not time-driven: an asset sensor fires the stocks transform the moment a new file lands in `s3://bronze/stocks/`, instead of waiting for a fixed clock time. A freshness policy can flag a dataset that hasn't been updated when it should have been — useful for catching a silently-broken API key before the dashboard just looks stale.
 - **Manual & backfill runs** — March Madness is triggered by hand when the Kaggle dataset drops, not on a schedule. Partitioned assets (NFL data by week, or historical seasons) can be backfilled on demand if you need to reprocess.
 
 **One asterisk on Principle 3 ("compute is ephemeral"):** the Dagster daemon itself has to run continuously to evaluate schedules and sensors — it's a small, cheap, always-on control-plane process, not compute. It wakes up ephemeral Spark/Dask/Python jobs; it doesn't do the work itself.
@@ -138,7 +150,7 @@ A reference layout for three nodes — the sweet spot for "small cluster." With 
 | Node | Role | Runs |
 |---|---|---|
 | `node-a` | Control | k3s server, platform-gateway, catalog-lite + Postgres (metadata), Keycloak, UI shell |
-| `node-b` | Storage | MinIO, Longhorn/NFS volumes, Postgres (warehouse, if split from node-a), Trino coordinator |
+| `node-b` | Storage | SeaweedFS, Longhorn/NFS volumes, Postgres (warehouse, if split from node-a), Trino coordinator |
 | `node-c` (+ `node-d`) | Compute — tainted | JupyterHub kernels, ephemeral Spark/Dask workers, Dagster job runners, Streamlit/Superset pods |
 
 Label and taint the compute node(s) so a Spark job can't starve the shell or the catalog of CPU during a Sunday-afternoon NFL scoring run.
@@ -173,14 +185,14 @@ Most of this platform doesn't need backing up — it needs to be *reconstructibl
 
 | What | Where it lives | How it's backed up |
 |---|---|---|
-| Catalog + workspace metadata | Postgres (catalog-lite schema) | CloudNativePG's built-in WAL archiving + base backups, continuously, to a dedicated MinIO bucket — point-in-time recovery, not just nightly snapshots |
+| Catalog + workspace metadata | Postgres (catalog-lite schema) | CloudNativePG's built-in WAL archiving + base backups, continuously, to a dedicated SeaweedFS bucket — point-in-time recovery, not just nightly snapshots |
 | Keycloak realm (users, groups, workspaces) | Postgres (Keycloak schema) | Same CloudNativePG mechanism, same bucket |
-| The actual data lake | MinIO | On-cluster: Longhorn/NFS replication protects against one disk or one node dying. Off-cluster: a scheduled `mc mirror` of critical buckets to an external drive or offsite location — on-cluster redundancy alone doesn't survive a fire, theft, or a bad `rm` |
+| The actual data lake | SeaweedFS | On-cluster: Longhorn/NFS replication protects against one disk or one node dying. Off-cluster: a scheduled `rclone sync` of critical buckets to an external drive or offsite location — on-cluster redundancy alone doesn't survive a fire, theft, or a bad `rm` |
 | Secrets encryption key (sealed-secrets private key, or Vault unseal keys) | Nowhere reproducible | The one thing that must be exported and stored *outside* the cluster the moment it's generated — lose this and every other backup is unreadable ciphertext |
-| k3s cluster datastore (etcd/sqlite) | `node-a` | k3s's built-in `etcd-snapshot` (or a cron'd copy of the sqlite file), sent to the same offsite destination as the secrets key |
+| k3s cluster datastore (SQLite by default; etcd if `--cluster-init`) | `node-a` | `bootstrap/snapshot-setup.sh` — a systemd timer running a SQLite online `.backup` (not k3s's built-in `etcd-snapshot`, which is etcd-only and doesn't apply to this repo's single-server SQLite datastore), with optional `rclone` push to any cloud remote |
 | Argo CD's own state | Git + a few in-cluster repo-credential secrets | Effectively already backed up — it's git. Only the repo credentials need to ride along with the secrets-key backup above |
 
-**What recovery actually looks like** if `node-a` dies outright: provision a replacement, restore the k3s datastore snapshot and the secrets encryption key, point it at the git repo, and Argo CD reconciles `core/` and `modules-enabled/` back into existence on its own — that's the payoff of everything being declarative. Then restore the two Postgres databases from their CloudNativePG backups. MinIO's data was never on `node-a` to begin with (it lives on `node-b`, per §6), so it's untouched throughout. Total recovery time is bounded by how fast two databases restore and one script re-runs, not by how much configuration you remember by hand.
+**What recovery actually looks like** if `node-a` dies outright: provision a replacement, restore the k3s datastore snapshot and the secrets encryption key, point it at the git repo, and Argo CD reconciles `core/` and `modules-enabled/` back into existence on its own — that's the payoff of everything being declarative. Then restore the two Postgres databases from their CloudNativePG backups. SeaweedFS's data was never on `node-a` to begin with (it lives on `node-b`, per §6), so it's untouched throughout. Total recovery time is bounded by how fast two databases restore and one script re-runs, not by how much configuration you remember by hand.
 
 **What this design doesn't give you: zero-downtime failover.** A single control node means a control-node failure is an outage, not a seamless handoff — acceptable for a single low-stakes deployment, less so for a team depending on this daily. See §12 for the upgrade path.
 
@@ -196,7 +208,7 @@ Same five-step shape every time — ingest, land, transform, catalog, serve. Wha
 
 | Ingest | Land | Transform | Catalog | Serve |
 |---|---|---|---|---|
-| Dagster job hits price API, news API, Reddit via PRAW on a schedule | Raw JSON/parquet → `minio://bronze/stocks/` | Polars job joins price + mentions, scores sentiment → Postgres/Iceberg | Tables + the sentiment-scorer function registered | Streamlit ticker dashboard, ad hoc SQL in Jupyter via Trino |
+| Dagster job hits price API, news API, Reddit via PRAW on a schedule | Raw JSON/parquet → `s3://bronze/stocks/` | Polars job joins price + mentions, scores sentiment → Postgres/Iceberg | Tables + the sentiment-scorer function registered | Streamlit ticker dashboard, ad hoc SQL in Jupyter via Trino |
 
 ### In-season NFL betting ideas
 
@@ -204,7 +216,7 @@ Same five-step shape every time — ingest, land, transform, catalog, serve. Wha
 
 | Ingest | Land | Transform | Catalog | Serve |
 |---|---|---|---|---|
-| Weekly job pulls odds + team/player stats APIs | `minio://bronze/nfl/` | Feature pipeline scores edges; model version pulled from MLflow | Dataset + model version registered | Streamlit "this week's value bets" app, reads Postgres directly |
+| Weekly job pulls odds + team/player stats APIs | `s3://bronze/nfl/` | Feature pipeline scores edges; model version pulled from MLflow | Dataset + model version registered | Streamlit "this week's value bets" app, reads Postgres directly |
 
 > **Reuse ready:** feature/elo functions live in `platform-sdk`, not in this pipeline — so March Madness below doesn't reinvent them.
 
@@ -214,7 +226,7 @@ Same five-step shape every time — ingest, land, transform, catalog, serve. Wha
 
 | Ingest | Land | Transform | Catalog | Serve |
 |---|---|---|---|---|
-| Manual trigger pulls the Kaggle dataset | `minio://bronze/march-madness/` | Reuses NFL's feature functions + existing model from the registry | Run + submission logged, so you can compare seasons later | `submission.csv` in the UI, results browsable in Jupyter |
+| Manual trigger pulls the Kaggle dataset | `s3://bronze/march-madness/` | Reuses NFL's feature functions + existing model from the registry | Run + submission logged, so you can compare seasons later | `submission.csv` in the UI, results browsable in Jupyter |
 
 ---
 
@@ -230,7 +242,7 @@ platform/
     ui-shell/               # the one front door + workspace switcher
     auth/                    # Keycloak realm + client + workspace-group config
   modules/                    # every module the repo KNOWS how to install (the catalog)
-    storage-minio/
+    storage-seaweedfs/
     storage-postgres/
     query-trino/
     orchestration-dagster/
@@ -281,7 +293,7 @@ Each phase is usable on its own — you're not blocked on finishing the whole th
 | Phase | Focus | You get | Adds |
 |---|---|---|---|
 | 0 | Infrastructure bedrock | A cluster that stays up | k3s, MetalLB, ingress, cert-manager, Longhorn/NFS, Keycloak realm + workspace-group model (seeds one `personal` workspace), Argo CD, secrets, node role labels/taints + `join-node.sh`, `bootstrap/teardown.sh`, k3s datastore snapshot schedule, Prometheus/Grafana/Loki |
-| 1 | Storage | Somewhere to land data | MinIO, Postgres (CloudNativePG) with WAL-archive backups to MinIO, offsite `mc mirror` for critical buckets |
+| 1 | Storage | Somewhere to land data | SeaweedFS, Postgres (CloudNativePG) with WAL-archive backups to SeaweedFS, offsite `rclone sync` for critical buckets |
 | 2 | Catalog & shared code | Things become findable and reusable | catalog-lite (with `workspace_id` + visibility on every table), function publish/versioning (`platform-cli function promote`), `platform module uninstall --purge-data`, platform-sdk, platform-cli, `platform workspace` commands, git remote |
 | 3 | Query + exploration | You can actually look at your data | Trino, JupyterHub — bundled together since one needs the other |
 | 4 | Orchestration | Ingestion stops being a cron job on your laptop | Dagster + daemon, cron schedule + asset sensor for the stocks pipeline, failure-hook alerting |

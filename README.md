@@ -33,6 +33,17 @@ See `bootstrap/install.sh --help` for flags (role, branch/revision to track, etc
 
 To tear a test deployment back down to nothing: `./bootstrap/teardown.sh`.
 
+## Backing up the cluster's own datastore
+
+`sudo ./bootstrap/snapshot-setup.sh` sets up scheduled snapshots of k3s's own SQLite datastore
+(separate from Postgres/CNPG backups, which are an in-cluster concern) — local by default, with
+optional `rclone` push to any cloud remote. Independent of `install.sh`: run it before, right
+after, or months later; re-running it or hand-editing `/etc/opendataplatform/k3s-snapshot.conf`
+just updates the schedule/destination in place. See `bootstrap/snapshot-setup.sh --help` and the
+script's own header comments for the full design (why k3s's built-in `etcd-snapshot` feature
+doesn't apply here). Not applicable on managed k8s (EKS/GKE/AKS) — there's no host-level datastore
+to back up.
+
 ## Contributing
 
 Branch workflow, local hooks, and CI expectations are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
