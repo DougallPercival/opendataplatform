@@ -1,12 +1,14 @@
-# First CI workflow in this repo (2026-09-01) — currently covers only
-# catalog-service (test, then build+push its image). The full path-filtered
-# matrix ARCHITECTURE.md §10 and CONTRIBUTING.md describe (markdownlint,
-# yamllint, shellcheck, hadolint, helm lint) is still aspirational — add
-# those jobs as the pieces they'd actually check show up, same "don't build
-# what the current phase doesn't need yet" pattern the rest of this repo
-# follows. This file's own path filter below is deliberately narrow for the
-# same reason: it shouldn't fire on changes that have nothing to do with
-# catalog-service.
+# First CI workflow in this repo (2026-09-01) — covers catalog-service
+# (test, then build+push its image) and, added the same day once they
+# existed, platform-sdk + platform-cli (lint+test only — they're a library
+# and a CLI tool, not something that gets built into a container image).
+# The full path-filtered matrix ARCHITECTURE.md §10 and CONTRIBUTING.md
+# describe (markdownlint, yamllint, shellcheck, hadolint, helm lint) is
+# still aspirational — add those jobs as the pieces they'd actually check
+# show up, same "don't build what the current phase doesn't need yet"
+# pattern the rest of this repo follows. This file's own path filter below
+# is deliberately narrow for the same reason: it shouldn't fire on changes
+# that have nothing to do with any of these three packages.
 name: CI
 
 on:
@@ -14,19 +16,57 @@ on:
     branches: [dev, test, main]
     paths:
       - "src/core/catalog-service/**"
+      - "src/platform-sdk/**"
+      - "src/platform-cli/**"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [dev, test, main]
     paths:
       - "src/core/catalog-service/**"
+      - "src/platform-sdk/**"
+      - "src/platform-cli/**"
       - ".github/workflows/ci.yml"
 
 permissions:
   contents: read
 
 jobs:
+  # Added alongside platform-sdk/platform-cli's own job below: with the top-
+  # level `paths:` filters above now matching THREE independent packages,
+  # any change to any one of them fires the whole workflow — which, without
+  # this gate, meant a platform-sdk-only change would also spin up
+  # catalog-service's Postgres service container and run a full Docker
+  # build (and, on a push to dev/test/main, actually PUSH a redundant image
+  # to GHCR under an unchanged tag) despite catalog-service not having
+  # changed at all. This job computes which package(s) actually changed
+  # once, so `test`/`build-and-push` and `test-platform-packages` below can
+  # each skip themselves when their own package didn't change — real cost/
+  # correctness fix, not just tidiness (an unnecessary GHCR push isn't
+  # dangerous, but it's not nothing either).
+  changes:
+    name: Detect which package(s) changed
+    runs-on: ubuntu-latest
+    outputs:
+      catalog_service: ${{ steps.filter.outputs.catalog_service }}
+      platform_packages: ${{ steps.filter.outputs.platform_packages }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            catalog_service:
+              - 'src/core/catalog-service/**'
+              - '.github/workflows/ci.yml'
+            platform_packages:
+              - 'src/platform-sdk/**'
+              - 'src/platform-cli/**'
+              - '.github/workflows/ci.yml'
+
   test:
     name: Test catalog-service
+    needs: changes
+    if: needs.changes.outputs.catalog_service == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -60,7 +100,14 @@ jobs:
 
   build-and-push:
     name: Build & push image
-    needs: test
+    needs: [changes, test]
+    # Redundant with the fact that a skipped `test` already cascades to
+    # skip anything that `needs` it (GitHub Actions' default `if:
+    # success()` treats a skipped dependency as not-success) — written out
+    # explicitly anyway, same "explicit over implicit" preference as the
+    # rest of this repo's comments, so this job's own condition is legible
+    # without having to know that cascade rule.
+    if: needs.changes.outputs.catalog_service == 'true'
     runs-on: ubuntu-latest
     # Least-privilege: only this job ever touches GHCR, so only this job
     # gets packages: write — `test` above inherits the workflow-level
@@ -136,3 +183,45 @@ jobs:
             org.opencontainers.image.source=https://github.com/DougallPercival/opendataplatform
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  test-platform-packages:
+    name: Test platform-sdk + platform-cli
+    needs: changes
+    if: needs.changes.outputs.platform_packages == 'true'
+    runs-on: ubuntu-latest
+    # No `services: postgres` here, unlike `test` above — deliberately.
+    # Both packages' own tests are mocked at their own boundary (respx for
+    # platform-sdk's HTTP calls, Typer's CliRunner with PlatformClient
+    # monkeypatched for platform-cli) rather than run against a live
+    # catalog-service — see each package's own README for why. A shared job
+    # with catalog-service's `test` would either drag an unneeded Postgres
+    # container into every platform-sdk/platform-cli-only run or force an
+    # awkward conditional service block; two jobs cleanly matches two
+    # actually-different dependency shapes.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # platform-cli depends on platform-sdk by name with no version pin
+      # (see platform-cli/pyproject.toml — no published package to resolve
+      # against, just a sibling in this monorepo), so it has to install
+      # after platform-sdk is already present for pip's resolver to satisfy
+      # it with — same two-step order both packages' READMEs document for
+      # local dev, reproduced here rather than diverging from it.
+      - name: Install platform-sdk (editable, with dev extras)
+        working-directory: src/platform-sdk
+        run: pip install -e ".[dev]"
+      - name: Install platform-cli (editable, with dev extras)
+        working-directory: src/platform-cli
+        run: pip install -e ".[dev]"
+      - name: Lint + test platform-sdk
+        working-directory: src/platform-sdk
+        run: |
+          ruff check .
+          python -m pytest -v
+      - name: Lint + test platform-cli
+        working-directory: src/platform-cli
+        run: |
+          ruff check .
+          python -m pytest -v
