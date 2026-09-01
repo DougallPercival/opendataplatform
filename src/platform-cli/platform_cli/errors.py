@@ -1,6 +1,13 @@
 """One decorator, applied to every command, instead of a try/except block
-repeated in each of them — PlatformAPIError -> a readable stderr message
-and exit code 1, not a raw traceback a CLI user shouldn't have to read.
+repeated in each of them — PlatformAPIError/KeycloakAdminError -> a
+readable stderr message and exit code 1, not a raw traceback a CLI user
+shouldn't have to read. Both exception types land on the same decorator
+(rather than a second `handle_keycloak_errors`) because from platform-cli's
+point of view they're the same shape of problem — "something external
+rejected the request" — just from two different backends (catalog-service
+vs. Keycloak's Admin API); `workspace invite` is the only command that can
+raise the latter, but there's no reason for it to need a different
+decorator to get the same treatment.
 
 functools.wraps matters here for a reason beyond the usual "preserve
 __name__/__doc__": Typer builds each command's CLI signature (its options
@@ -17,7 +24,7 @@ import functools
 from collections.abc import Callable
 
 import typer
-from platform_sdk import PlatformAPIError
+from platform_sdk import KeycloakAdminError, PlatformAPIError
 
 
 def handle_api_errors[F: Callable](func: F) -> F:
@@ -28,6 +35,9 @@ def handle_api_errors[F: Callable](func: F) -> F:
         except PlatformAPIError as exc:
             message = f"catalog-service error ({exc.status_code}): {exc.detail}"
             typer.secho(message, fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+        except KeycloakAdminError as exc:
+            typer.secho(f"Keycloak error: {exc}", fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1) from exc
 
     return wrapper  # type: ignore[return-value]

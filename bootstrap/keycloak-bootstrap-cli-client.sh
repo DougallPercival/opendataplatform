@@ -19,10 +19,20 @@
 # Safe to re-run: checks for an existing "platform-cli" client before
 # creating one, and reuses it rather than erroring or duplicating.
 #
-# What it needs, and where each comes from:
+# Requirements (checked at startup via require_cmd — dies immediately with a
+# clear message if any is missing, doesn't fail partway through):
 #   - kubectl reaching your cluster (uses sudo, same as every other script
 #     here — see lib/common.sh's PATH comment for why /usr/local/bin/kubectl
 #     is spelled out explicitly rather than relying on PATH through sudo)
+#   - curl, base64 — present on essentially every distro by default.
+#   - jq — NOT always present by default. Rocky/RHEL/Alma:
+#     `sudo dnf install jq`. Ubuntu/Debian: `sudo apt install jq`. macOS:
+#     `brew install jq`. Same "verify before you hand someone a script that
+#     dies on step one" reasoning as documenting the Python 3.12+ requirement
+#     elsewhere in this repo (see catalog-service/platform-sdk/platform-cli's
+#     READMEs and docs/known-issues.md).
+#
+# What it needs beyond tools, and where each comes from:
 #   - `platform-initial-admin` (namespace keycloak) — the Keycloak Operator's
 #     own auto-generated bootstrap-admin Secret (kubernetes.io/basic-auth:
 #     username/password keys). Nothing in this repo creates this; the

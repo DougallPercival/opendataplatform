@@ -20,3 +20,13 @@ class PlatformAPIError(Exception):
         self.method = method
         self.url = url
         super().__init__(f"{method} {url} -> {status_code}: {detail}")
+
+
+class KeycloakAdminError(Exception):
+    """Raised for anything that goes wrong on `KeycloakAdminClient`'s behalf
+    — a missing/rejected client secret, a port-forward that never came up, a
+    username Keycloak doesn't know about, an unexpected Admin API status.
+    One exception type here too, same reasoning as PlatformAPIError above,
+    even though the failure modes are more varied (this talks to kubectl and
+    a port-forward, not just HTTP) — platform-cli still only needs to catch
+    one thing."""

@@ -21,12 +21,33 @@ platform dataset update DATASET_ID [--description TEXT] [--visibility ...] [--lo
 platform dataset delete DATASET_ID
 ```
 
-Not built yet: `platform workspace invite` (needs Keycloak Admin API integration — deliberately
-deferred, its own follow-up piece) and commands for the other four catalog-service resource types
-(pipelines, models, functions incl. publish/promote, lineage) — same "add it when platform-cli
-actually needs it" reasoning as everywhere else in this repo. `platform module scaffold/install` from
-ARCHITECTURE.md §3/§7 is unrelated future scope (module lifecycle, not catalog data) — not part of
-this package's current slice either.
+Not built yet: commands for the other four catalog-service resource types (pipelines, models,
+functions incl. publish/promote, lineage) — same "add it when platform-cli actually needs it"
+reasoning as everywhere else in this repo. `platform module scaffold/install` from ARCHITECTURE.md
+§3/§7 is unrelated future scope (module lifecycle, not catalog data) — not part of this package's
+current slice either.
+
+## Workspace invites (2026-09-01)
+
+```text
+platform workspace invite USERNAME [--workspace NAME] [--role owner|editor|viewer]
+```
+
+Adds an EXISTING Keycloak user to a workspace's `owner`/`editor`/`viewer` group. Defaults: `--role
+viewer` (least privilege), `--workspace` from `PLATFORM_WORKSPACE`/`personal` like every other
+command. Doesn't create the user — see `platform_sdk`'s README ("Workspace invites") for why, and for
+the required `PLATFORM_KEYCLOAK_CLIENT_SECRET` setup via `bootstrap/keycloak-bootstrap-cli-client.sh`.
+
+Different from every other command here in one way worth knowing before you run it: it does NOT talk
+to catalog-service or need `PLATFORM_CATALOG_URL` at all — it talks to Keycloak directly, and manages
+its own `kubectl port-forward` to do it (needs `kubectl` + the same `sudo` access every bootstrap
+script in this repo assumes). No separate port-forward to set up first.
+
+Confirmed against Admin REST API calls verified against Keycloak's own docs (see
+`platform_sdk/keycloak_admin.py`'s module docstring) and a full respx-mocked test suite, but — like
+`bootstrap/keycloak-bootstrap-cli-client.sh` itself — not yet run against a live Keycloak from this
+package's side. Whoever runs `platform workspace invite` for real first should treat that the same
+way the bootstrap script's own first run was treated: tell me what happens.
 
 ## Requirements
 
