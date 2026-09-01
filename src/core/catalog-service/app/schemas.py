@@ -10,6 +10,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import Visibility
+from app.visibility import Role
 
 
 # ---- Workspace --------------------------------------------------------
@@ -24,6 +25,20 @@ class WorkspaceRead(BaseModel):
     name: str
     display_name: str
     created_at: datetime
+
+
+class PrincipalRead(BaseModel):
+    """Body of GET /me — "who does the server think I am, given my current
+    headers." Deliberately separate from WorkspaceRead: role/user_id are
+    properties of the REQUEST (this Principal), not of the Workspace row
+    itself — two different callers hitting the same workspace get the same
+    WorkspaceRead but a different PrincipalRead. Mainly for platform-cli/
+    platform-sdk to self-check what they're allowed to do before trying."""
+
+    workspace_id: uuid.UUID
+    workspace_name: str
+    user_id: str
+    role: Role
 
 
 # ---- Shared entity fields ----------------------------------------------

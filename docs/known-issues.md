@@ -444,13 +444,15 @@ remove this entry at that point rather than leaving it pointed at the wrong plac
 
 ### `catalog-service`'s auth is a placeholder — don't expose it past the cluster boundary yet
 
-Added 2026-09-01, Phase 2 kickoff. `src/core/catalog-service/app/deps.py`'s `get_current_principal`
-trusts two plain headers (`X-Workspace`, `X-User`) with no verification at all — anyone who can
-reach the service can claim to be any workspace, as any user, and read/write accordingly. This
-isn't a bug to fix in that file; it's an intentionally deferred seam. Real auth is
-`platform-gateway`'s job once it exists and proxies here (see that module's own README and
-`catalog-service/app/deps.py`'s docstring for the intended shape — gateway verifies the Keycloak
-JWT once, the way it already will for every other module per ARCHITECTURE.md §3, and forwards the
+Added 2026-09-01, Phase 2 kickoff; updated 2026-09-01 (same day) when role enforcement landed.
+`src/core/catalog-service/app/deps.py`'s `get_current_principal` trusts three plain headers
+(`X-Workspace`, `X-User`, and now `X-Role`) with no verification at all — anyone who can reach the
+service can claim to be any workspace, as any user, in any role (including `owner`, the default),
+and read/write accordingly. This isn't a bug to fix in that file; it's an intentionally deferred
+seam. Real auth is `platform-gateway`'s job once it exists and proxies here (see that module's own
+README and `catalog-service/app/deps.py`'s docstring for the intended shape — gateway verifies the
+Keycloak JWT once, the way it already will for every other module per ARCHITECTURE.md §3, reading
+the group/role claim `src/core/auth/realm-platform.yaml`'s groups already encode, and forwards the
 verified identity downstream as trusted headers this same function keeps reading).
 
 **Status:** not a bug, a documented gap. **Do not** put `catalog-service` behind an `Ingress`, a

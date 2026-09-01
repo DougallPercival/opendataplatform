@@ -11,7 +11,7 @@ import uuid
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.visibility import Principal, can_write, read_filter
+from app.visibility import Principal, can_create, can_write, read_filter
 
 
 def list_visible(db: Session, model, principal: Principal):
@@ -32,6 +32,8 @@ def get_visible_or_404(db: Session, model, entity_id: uuid.UUID, principal: Prin
 
 
 def create(db: Session, model, data: dict, principal: Principal):
+    if not can_create(principal):
+        raise HTTPException(status_code=403, detail="Viewers cannot create entries.")
     entity = model(**data, workspace_id=principal.workspace_id, created_by=principal.user_id)
     db.add(entity)
     try:

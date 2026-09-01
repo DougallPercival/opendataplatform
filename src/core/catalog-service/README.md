@@ -66,11 +66,27 @@ public). See `docs/known-issues.md`.
 PreSync `alembic upgrade head` Job against the `catalog` database, then a 1-replica Deployment +
 ClusterIP Service — deliberately no Ingress, see `docs/known-issues.md`'s auth entry below.
 
+## Roles (2026-09-01)
+
+`app/visibility.py` now enforces owner/editor/viewer (ARCHITECTURE.md §4's table) on every write:
+a viewer can read anything visibility already lets them read, but `can_write`/`can_create` block
+them from creating, updating, deleting, publishing, or promoting — even something they created
+themselves. Role arrives the same placeholder way workspace/user identity already do — a new
+`X-Role` header, trusted with zero verification until `platform-gateway` exists (see
+`app/deps.py`'s docstring) — and defaults to `owner` when absent, so nothing that predates this
+header (every existing test, every curl example above) needed to change. `GET /me` reflects the
+resolved workspace/user/role back for a caller to self-check.
+
+What this **isn't**: membership storage. Nothing here decides *who's* a workspace's owner/editor/
+viewer — that's still entirely Keycloak-group territory (`src/core/auth/realm-platform.yaml`'s
+`/workspaces/<name>/<role>` groups), and `platform workspace invite` (actually adding someone to
+one of those groups via Keycloak's Admin API) is still not built — that's `platform-cli`'s job.
+This service only decides what a *given, already-resolved* role is allowed to do once it has one.
+
 ## Not yet built
 
-- **Real auth.** See `app/deps.py`'s docstring.
-- **Membership/roles on workspaces** (owner/editor/viewer, §4's table) — `platform workspace
-  invite`, tied to Keycloak group membership, not built yet; today `POST /workspaces` just creates
-  a row.
+- **Real auth.** See `app/deps.py`'s docstring — X-Role included now, same caveat.
+- **`platform workspace invite`** — actually writing a user into a workspace's Keycloak group.
+  Needs `platform-cli` calling Keycloak's Admin REST API; nothing here does that yet.
 - **platform-sdk / platform-cli** — the actual clients of this API (`@platform.dataset` etc.,
   `platform-cli publish`). Nothing calls this service yet except its own tests.
