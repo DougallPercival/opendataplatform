@@ -104,7 +104,28 @@ jobs:
           # pointing at a branch rather than a pinned commit. A Deployment
           # that wants a specific promoted version points at :test or :main
           # instead — see manifests/catalog-service.yaml's own tag choice.
-          tags: ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          #
+          # NOT simply github.ref_name on both event types, though — that's
+          # what this line originally was, and it broke the very first real
+          # pull_request run: for a pull_request event, github.ref_name is
+          # "<pr-number>/merge" (the ref is refs/pull/<n>/merge), and a "/"
+          # inside the tag component is an invalid Docker reference —
+          # buildx fails with "invalid reference format" even though push
+          # (above) is already false, because buildx still validates --tag
+          # up front for a build-only run, before it ever gets to the point
+          # of deciding not to push it. The tag's actual value never matters
+          # on a PR build (nothing is pushed), so branch on event_name: push
+          # events keep the meaningful branch-name tag, pull_request events
+          # get a PR-numbered one instead — valid, and still useful for
+          # correlating a failed build with its PR if you're staring at the
+          # Actions cache. Caught 2026-09-01 via a real PR run (the
+          # feature/workspace-roles -> dev PR), not by local simulation —
+          # nothing before this had ever exercised the pull_request trigger
+          # for real.
+          tags: >-
+            ${{ github.event_name == 'push'
+            && format('{0}:{1}', env.IMAGE_NAME, github.ref_name)
+            || format('{0}:pr-{1}', env.IMAGE_NAME, github.event.pull_request.number) }}
           # Links the image to this repo (Settings -> Packages shows
           # "opendataplatform" as its source) so GHCR can inherit access
           # permissions from the repo. Does NOT make the package public by
