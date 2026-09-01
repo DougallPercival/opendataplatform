@@ -8,11 +8,14 @@ migrations applied (`alembic upgrade head`, see ../migrations/).
 """
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.deps import get_current_principal
 from app.routers import datasets, functions, lineage, ml_models, pipelines, workspaces
+from app.schemas import PrincipalRead
+from app.visibility import Principal
 
 app = FastAPI(
     title="catalog-lite",
@@ -39,3 +42,17 @@ app.include_router(lineage.router)
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.get("/me", response_model=PrincipalRead)
+def me(principal: Principal = Depends(get_current_principal)):
+    """"Who am I, per my current X-Workspace/X-User/X-Role headers" — see
+    app/deps.py's docstring for why those are placeholders, not verified
+    identity. Top-level, not under /workspaces, since this describes the
+    caller, not a workspace resource — see PrincipalRead's own docstring."""
+    return PrincipalRead(
+        workspace_id=principal.workspace_id,
+        workspace_name=principal.workspace_name,
+        user_id=principal.user_id,
+        role=principal.role,
+    )

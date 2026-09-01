@@ -2,7 +2,9 @@
 (owner/editor/viewer — ARCHITECTURE.md §4), and invites are Keycloak-group
 territory (`platform workspace invite`, not built yet) — this table mirrors
 workspace *existence* for the catalog's own FK, it isn't where membership
-gets decided.
+gets decided. Once a role IS resolved (per-request, via app/deps.py), what
+it's allowed to do is app/visibility.py's Role/can_write/can_create — not
+this file, and not another column here.
 """
 from __future__ import annotations
 

@@ -15,7 +15,7 @@ from app.database import get_db
 from app.deps import get_current_principal
 from app.models import EntityKind, LineageEdge, LineageRelation
 from app.schemas import LineageEdgeCreate, LineageEdgeRead
-from app.visibility import Principal
+from app.visibility import Principal, can_create
 
 router = APIRouter(prefix="/lineage", tags=["lineage"])
 
@@ -45,6 +45,8 @@ def create_lineage_edge(
     db: Session = Depends(get_db),
     principal: Principal = Depends(get_current_principal),
 ):
+    if not can_create(principal):
+        raise HTTPException(status_code=403, detail="Viewers cannot create lineage edges.")
     try:
         source_kind = EntityKind(body.source_kind)
         target_kind = EntityKind(body.target_kind)

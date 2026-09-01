@@ -119,3 +119,56 @@ def test_function_publish_bumps_version_and_promote_makes_it_public(client):
     assert other.status_code == 201
     cross = client.get(f"/functions/{function_id}", headers={"X-Workspace": "another"})
     assert cross.status_code == 200
+
+
+def test_viewer_role_reads_but_cannot_create_or_write(client):
+    # Set up as owner (the default — no X-Role needed) so there's something
+    # for the viewer to read and to fail to write.
+    created = client.post(
+        "/datasets",
+        headers={"X-Workspace": "personal", "X-User": "alice"},
+        json={"name": "viewer-target", "visibility": "workspace"},
+    )
+    assert created.status_code == 201, created.text
+    dataset_id = created.json()["id"]
+
+    viewer_headers = {"X-Workspace": "personal", "X-User": "bob", "X-Role": "viewer"}
+
+    # Read still works — role only gates writes.
+    resp = client.get(f"/datasets/{dataset_id}", headers=viewer_headers)
+    assert resp.status_code == 200
+
+    # Create is blocked.
+    resp = client.post(
+        "/datasets", headers=viewer_headers, json={"name": "should-not-exist", "visibility": "private"}
+    )
+    assert resp.status_code == 403
+
+    # Write to an existing, otherwise-writable (same workspace) entity is blocked.
+    resp = client.patch(f"/datasets/{dataset_id}", headers=viewer_headers, json={"description": "nope"})
+    assert resp.status_code == 403
+
+    # Delete is blocked too.
+    resp = client.delete(f"/datasets/{dataset_id}", headers=viewer_headers)
+    assert resp.status_code == 403
+
+
+def test_me_reflects_headers_including_default_role(client):
+    # No X-Role sent — should reflect DEFAULT_ROLE (owner), not error or 422.
+    resp = client.get("/me", headers={"X-Workspace": "personal", "X-User": "alice"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["user_id"] == "alice"
+    assert body["workspace_name"] == "personal"
+    assert body["role"] == "owner"
+
+    resp = client.get(
+        "/me", headers={"X-Workspace": "personal", "X-User": "bob", "X-Role": "Viewer"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["role"] == "viewer"  # case-insensitive header value normalized
+
+
+def test_unknown_role_header_rejected(client):
+    resp = client.get("/me", headers={"X-Role": "superadmin"})
+    assert resp.status_code == 400
