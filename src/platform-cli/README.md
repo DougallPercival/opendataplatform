@@ -45,6 +45,11 @@ source ~/.venvs/platform/bin/activate
 deadsnakes PPA; macOS — `brew install python@3.12`. See `catalog-service/README.md`'s "Running
 locally" section for the full per-OS list; not repeated here to avoid the two copies drifting.)
 
+**The venv isn't active by default in a new shell** — `source ~/.venvs/platform/bin/activate`
+first, every time, or `platform: command not found` even though it's installed. Easy to forget
+after switching terminals/reconnecting SSH; if `platform` isn't found and you're sure it's
+installed, this is almost always why.
+
 ## Local dev setup
 
 Two editable installs, in this order — `platform-cli` depends on `platform-sdk` by name with no
