@@ -498,6 +498,30 @@ sync, before Reflector catches up.
 — same resolution as Keycloak's version of this same race. Don't chase it if you see it once on a
 fresh install; only worth investigating if it's still failing more than a minute or two later.
 
+### `catalog-service`/`platform-sdk`/`platform-cli` need Python 3.12+ — most hosts' default `python3` is older
+
+Hit for real on `homelab-dev` (Rocky Linux 9.4, 2026-09-01, installing `platform-sdk`/`platform-cli`
+there for the first time): the default `python3` was 3.9.19, and `pip install -e ...` failed with
+`requires a different Python` against `requires-python = ">=3.12"` in all three packages'
+`pyproject.toml`. Not a bug in any of them — this repo's Python code has required 3.12+ since
+`catalog-service` first existed; it just hadn't been installed directly on a host's own Python
+before (CI runs `actions/setup-python@v5` with `3.12` explicitly, and the in-cluster Deployment
+runs it from a container image with its own Python — this was the first time anything needed the
+*host's* `python3` to already be 3.12+).
+
+**Fix, host-dependent (this isn't something a script here can install for you — see the "Getting a
+cluster up" prerequisites this repo has never enumerated before now):**
+
+- RHEL-family 9.x (Rocky/Alma/RHEL, like `homelab-dev`): `sudo dnf install python3.12` — ships
+  directly from AppStream as a non-modular package, no EPEL needed, installs alongside (doesn't
+  replace) the system `python3`. Then invoke it explicitly: `python3.12 -m venv ...`.
+- Ubuntu 22.04 ships 3.10, same problem: `sudo apt install python3.12` if your release carries it,
+  otherwise the deadsnakes PPA.
+- macOS: `brew install python@3.12`.
+
+Each of `catalog-service/README.md`, `platform-sdk/README.md`, and `platform-cli/README.md` now
+states this requirement up front rather than only surfacing it as a pip error.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a

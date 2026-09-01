@@ -35,6 +35,20 @@ thing. See "Not yet built" below for what's deliberately left for the next steps
 
 ## Running locally
 
+**Requires Python 3.12+** (`requires-python` in `pyproject.toml`). Most systems' default `python3`
+is older than that — notably RHEL-family (Rocky/Alma/RHEL) 9.x, whose default is 3.9, and Ubuntu
+22.04's, which is 3.10 — so `pip install -e ".[dev]"` will fail with `requires a different Python`
+if you just run it against whatever `python3`/`pip` resolves to by default. Get 3.12+ first, then
+use it explicitly:
+
+- **RHEL-family 9.x (Rocky/Alma/RHEL):** `sudo dnf install python3.12` — ships directly from
+  AppStream as a non-modular package (installs alongside the system Python, doesn't replace it), no
+  EPEL or third-party repo needed. Then `python3.12 -m venv .venv && source .venv/bin/activate`
+  before the commands below.
+- **Ubuntu/Debian:** `sudo apt install python3.12` if your release ships it, otherwise the
+  deadsnakes PPA (`sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt install python3.12`).
+- **macOS:** `brew install python@3.12`.
+
 ```bash
 cp .env.example .env   # edit DATABASE_URL if not using the default local Postgres
 pip install -e ".[dev]"

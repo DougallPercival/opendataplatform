@@ -22,6 +22,14 @@ describes (self-registration for *code*, the counterpart to the module self-regi
 §3) also aren't built yet — this pass is the client those decorators will eventually call into, not
 the decorators themselves.
 
+## Requirements
+
+**Python 3.12+** (`requires-python` in `pyproject.toml`) — most systems' default `python3` is
+older (RHEL-family 9.x ships 3.9, Ubuntu 22.04 ships 3.10), so `pip install -e ".[dev]"` fails with
+`requires a different Python` against a bare `python3`/`pip`. See `catalog-service/README.md`'s
+"Running locally" section for per-OS install commands (same requirement, same fix, verified there
+against a real Rocky 9.4 box) — not repeated here to avoid the two copies drifting apart.
+
 ## Using it
 
 ```python
