@@ -43,11 +43,15 @@ to catalog-service or need `PLATFORM_CATALOG_URL` at all — it talks to Keycloa
 its own `kubectl port-forward` to do it (needs `kubectl` + the same `sudo` access every bootstrap
 script in this repo assumes). No separate port-forward to set up first.
 
-Confirmed against Admin REST API calls verified against Keycloak's own docs (see
-`platform_sdk/keycloak_admin.py`'s module docstring) and a full respx-mocked test suite, but — like
-`bootstrap/keycloak-bootstrap-cli-client.sh` itself — not yet run against a live Keycloak from this
-package's side. Whoever runs `platform workspace invite` for real first should treat that the same
-way the bootstrap script's own first run was treated: tell me what happens.
+**Confirmed working end-to-end (2026-09-01)**, not just respx-mocked: `platform workspace invite
+dougall --role editor` against a real user created by hand in Keycloak's admin console (see
+`bootstrap/keycloak-bootstrap-cli-client.sh` for how `PLATFORM_KEYCLOAK_CLIENT_SECRET` gets set up)
+correctly joined the already-seeded `/workspaces/personal/editor` group and printed `'dougall' added
+to /workspaces/personal/editor (Reused that Keycloak group)`. That proves the "join an existing
+group" path against a live cluster — the "self-heal a missing workspace/role group" path (invite into
+a workspace besides `personal`, which `platform workspace create` never wires up in Keycloak) is
+still only covered by `platform-sdk`'s mocked test suite, not yet exercised live. Worth trying once
+there's a second workspace to invite into.
 
 ## Requirements
 

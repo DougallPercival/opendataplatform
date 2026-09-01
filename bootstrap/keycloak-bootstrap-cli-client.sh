@@ -163,22 +163,35 @@ info "Finding the client's service-account user..."
 SA_USER_ID="$("${CURL[@]}" "${AUTH[@]}" "${BASE_URL}/admin/realms/${REALM}/clients/${CLIENT_UUID}/service-account-user" \
   | jq -r .id)"
 
-info "Finding realm-management's 'manage-users' client role..."
+info "Finding realm-management's 'manage-users' and 'view-realm' client roles..."
 # manage-users, not a narrower fine-grained-admin-permissions grant scoped to
 # just the three workspace groups — the fine-grained route exists in
 # Keycloak and would be tighter, but it's real added setup complexity for a
 # personal/solo deployment; manage-users is the standard, well-documented
 # role for "this client can manage user accounts and group membership,"
-# which is exactly what `workspace invite` needs. Revisit if this ever runs
-# somewhere the blast radius of that role actually matters.
+# which covers most of what `workspace invite` needs (finding the user,
+# creating/joining workspace groups). Revisit if this ever runs somewhere
+# the blast radius of that role actually matters.
+#
+# view-realm ALSO needed (added after the first live run of
+# platform-cli's self-healing group-create path hit a 403): reading a
+# realm role's own representation — GET
+# /admin/realms/{realm}/roles/{name}, which KeycloakAdminClient's
+# _map_realm_role() needs before it can map owner/editor/viewer onto a
+# newly-created workspace group — falls under "viewing realm
+# configuration" in Keycloak's own admin-console-permissions docs, not
+# under manage-users' user/group scope. Read-only (view-, not manage-),
+# so this doesn't let the client change realm settings, just read this
+# one thing it already needed to read.
 REALM_MGMT_ID="$("${CURL[@]}" "${AUTH[@]}" "${BASE_URL}/admin/realms/${REALM}/clients?clientId=realm-management" \
   | jq -r '.[0].id')"
 MANAGE_USERS_ROLE="$("${CURL[@]}" "${AUTH[@]}" "${BASE_URL}/admin/realms/${REALM}/clients/${REALM_MGMT_ID}/roles/manage-users")"
+VIEW_REALM_ROLE="$("${CURL[@]}" "${AUTH[@]}" "${BASE_URL}/admin/realms/${REALM}/clients/${REALM_MGMT_ID}/roles/view-realm")"
 
-info "Granting 'manage-users' to the service account..."
+info "Granting 'manage-users' + 'view-realm' to the service account..."
 "${CURL[@]}" "${AUTH[@]}" -X POST "${BASE_URL}/admin/realms/${REALM}/users/${SA_USER_ID}/role-mappings/clients/${REALM_MGMT_ID}" \
-  -H "Content-Type: application/json" -d "[${MANAGE_USERS_ROLE}]" \
-  || warn "Role assignment request failed — if this is a rerun and the role's already assigned, that's likely a harmless duplicate-assignment error; check with the verification step below either way."
+  -H "Content-Type: application/json" -d "[${MANAGE_USERS_ROLE}, ${VIEW_REALM_ROLE}]" \
+  || warn "Role assignment request failed — if this is a rerun and the roles are already assigned, that's likely a harmless duplicate-assignment error; check with the verification step below either way."
 
 info "Fetching the client secret..."
 CLIENT_SECRET="$("${CURL[@]}" "${AUTH[@]}" "${BASE_URL}/admin/realms/${REALM}/clients/${CLIENT_UUID}/client-secret" \

@@ -51,6 +51,13 @@ Does **not** create Keycloak users — `realm-platform.yaml` sets `registrationA
 seeds no users on purpose (see that file's header comment). `invite()` raises a clear
 `KeycloakAdminError` naming this if the username doesn't already exist, rather than a bare 404.
 
+**Confirmed working end-to-end (2026-09-01)** against a real cluster, not just the respx-mocked
+tests below — `KeycloakAdminClient.invite()` (via `platform workspace invite`) successfully joined a
+real Keycloak user to the already-seeded `/workspaces/personal/editor` group: port-forward came up,
+the hostname-resolution patch worked, the client-credentials token exchange worked, the group-by-path
+lookup and the PUT join all did what the code expects. The self-heal path (creating a missing
+workspace/role group from scratch) is still mocked-only — see `platform-cli`'s README.
+
 ## Requirements
 
 **Python 3.12+** (`requires-python` in `pyproject.toml`) — most systems' default `python3` is
