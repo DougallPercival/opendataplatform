@@ -1,0 +1,117 @@
+# First CI workflow in this repo (2026-09-01) — currently covers only
+# catalog-service (test, then build+push its image). The full path-filtered
+# matrix ARCHITECTURE.md §10 and CONTRIBUTING.md describe (markdownlint,
+# yamllint, shellcheck, hadolint, helm lint) is still aspirational — add
+# those jobs as the pieces they'd actually check show up, same "don't build
+# what the current phase doesn't need yet" pattern the rest of this repo
+# follows. This file's own path filter below is deliberately narrow for the
+# same reason: it shouldn't fire on changes that have nothing to do with
+# catalog-service.
+name: CI
+
+on:
+  push:
+    branches: [dev, test, main]
+    paths:
+      - "src/core/catalog-service/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [dev, test, main]
+    paths:
+      - "src/core/catalog-service/**"
+      - ".github/workflows/ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test catalog-service
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/core/catalog-service
+    services:
+      # Real Postgres, not sqlite — tests/conftest.py runs the actual
+      # Alembic migrations against it and needs the enum types those
+      # migrations create (see models.py's create_type=False comment).
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: catalog_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: python -m pytest -v
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/catalog_test
+
+  build-and-push:
+    name: Build & push image
+    needs: test
+    runs-on: ubuntu-latest
+    # Least-privilege: only this job ever touches GHCR, so only this job
+    # gets packages: write — `test` above inherits the workflow-level
+    # contents: read and nothing more.
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # Hardcoded lowercase — ${{ github.repository_owner }} would resolve
+      # to "DougallPercival" (this repo's real GitHub casing, see every
+      # repoURL: elsewhere in src/core/argocd/), and GHCR/OCI image
+      # references MUST be all-lowercase or the push is rejected outright.
+      # Same "hardcoded, not derived — see the comment for where a fork
+      # personalizes it" pattern as repoURL/targetRevision in every self-
+      # referencing Argo CD Application (src/core/argocd/README.md) — if
+      # you fork this repo and want your own images, this is the other
+      # value you change, alongside repoURL.
+      IMAGE_NAME: ghcr.io/dougallpercival/catalog-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Build-only on PRs (proves the Dockerfile still builds cleanly) —
+      # never push from a PR, and never even attempt to log in for one:
+      # a PR from a fork only gets a read-only GITHUB_TOKEN regardless, so
+      # this "if" is belt-and-suspenders on top of a restriction GitHub
+      # already enforces, not the only thing preventing it.
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: src/core/catalog-service
+          push: ${{ github.event_name == 'push' }}
+          # Tag = the branch name, matching ARCHITECTURE.md §10 / CONTRIBUTING.md's
+          # dev -> test -> main promotion model: :dev always means "whatever
+          # dev currently is", same as Argo CD's targetRevision already
+          # pointing at a branch rather than a pinned commit. A Deployment
+          # that wants a specific promoted version points at :test or :main
+          # instead — see manifests/catalog-service.yaml's own tag choice.
+          tags: ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          # Links the image to this repo (Settings -> Packages shows
+          # "opendataplatform" as its source) so GHCR can inherit access
+          # permissions from the repo. Does NOT make the package public by
+          # itself — see docs/known-issues.md's "GHCR package defaults to
+          # private on first publish" entry for the one manual step still
+          # needed after this workflow's first successful run.
+          labels: |
+            org.opencontainers.image.source=https://github.com/DougallPercival/opendataplatform
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

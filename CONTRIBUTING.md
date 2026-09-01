@@ -27,10 +27,18 @@ status checks required, no direct or force pushes.
 
 ## CI
 
-Runs on every PR into `dev`/`test`/`main`, path-filtered so it only checks what changed:
-markdownlint on docs, yamllint on YAML, ruff + pytest on `src/platform-sdk`/`src/platform-cli`,
-shellcheck on `bootstrap/*.sh`, hadolint on Dockerfiles, `helm lint` on charts. See
-`.github/workflows/ci.yml`.
+`.github/workflows/ci.yml` exists today for one path: `src/core/catalog-service/**` — ruff + pytest
+(against a real `postgres:18` service container, running the actual Alembic migrations, not
+`sqlite`), then, on an actual push to `dev`/`test`/`main` (never on a PR), build and push its image
+to `ghcr.io/dougallpercival/catalog-service:<branch>`. **One manual step after that workflow's
+first successful push:** GHCR packages default to private — flip it to public once in the
+package's Settings (see `docs/known-issues.md`).
+
+The rest of the path-filtered matrix ARCHITECTURE.md §10 describes — markdownlint on docs, yamllint
+on YAML, ruff + pytest on `platform-sdk`/`platform-cli` once those exist, shellcheck on
+`bootstrap/*.sh`, hadolint on Dockerfiles, `helm lint` on charts — isn't built yet. Same "add it
+when there's something of that kind to check" reasoning as everywhere else in this repo; add each
+job as its corresponding piece of the repo actually shows up.
 
 ## Adding a module
 

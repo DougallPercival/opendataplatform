@@ -459,6 +459,43 @@ front of it — today it's only meant to be reached from inside the cluster (or 
 local dev, per its own README), where "anyone who can reach it" is a much smaller set of things
 than "anyone on your network."
 
+### GHCR packages default to private on first publish — one manual step after `ci.yml`'s first push
+
+Added 2026-09-01, alongside `.github/workflows/ci.yml` and `manifests/catalog-service.yaml`.
+Confirmed against GitHub's own docs before relying on it, not assumed: when a package is published
+to `ghcr.io` for the first time — via a workflow's ambient `GITHUB_TOKEN`, which is how `ci.yml`
+does it — its visibility defaults to **private**, regardless of whether the source repository
+itself is public. There's no setting that makes it inherit the repo's visibility automatically;
+the `org.opencontainers.image.source` label `ci.yml` sets links the package to this repo (so GHCR
+*can* inherit access permissions from it) but that's a different thing from visibility, which still
+needs one manual flip.
+
+**Fix, once, after `ci.yml`'s first successful push to `dev`:** on GitHub, go to the
+`catalog-service` package (`https://github.com/users/DougallPercival/packages/container/package/catalog-service`,
+or find it via your profile's Packages tab) → Package settings → "Danger Zone" → Change visibility
+→ Public → confirm by typing the package name. **This is one-way** — GitHub does not let you make a
+public package private again, so don't do this speculatively for a package you're not sure should
+be public.
+
+Until this is done, every pull against `ghcr.io/dougallpercival/catalog-service` from outside this
+GitHub account's own Actions runs (including `manifests/catalog-service.yaml`'s Deployment pulling
+it into your cluster) will fail with an authentication/not-found error — expected, not a sign
+anything else is broken.
+
+### First sync of the `catalog-service` Application can show a transient secret-not-found error
+
+Added 2026-09-01. Same underlying race as "Postgres is a shared core service, but its
+auto-generated credential can't leave its namespace" above, different pair of namespaces: this
+Application's `CreateNamespace=true` creates the `catalog-service` namespace as part of syncing
+itself, and Reflector (mirroring `platform-postgres-catalog-credentials` in from `postgres`) can
+only start mirroring into a namespace once it exists. So the migration Job and/or Deployment can
+briefly sit in `CreateContainerConfigError` ("secret ... not found") right after the very first
+sync, before Reflector catches up.
+
+**Status:** self-heals within seconds via Argo CD's `selfHeal` + Kubernetes' own pod backoff/retry
+— same resolution as Keycloak's version of this same race. Don't chase it if you see it once on a
+fresh install; only worth investigating if it's still failing more than a minute or two later.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a

@@ -3,7 +3,16 @@ name = "catalog-service"
 version = "0.1.0"
 description = "catalog-lite — the Unity-Catalog analog (ARCHITECTURE.md §2, §4, §12). Datasets, functions, pipelines, models, workspaces; Postgres + FastAPI, deliberately lightweight over OpenMetadata/DataHub."
 requires-python = ">=3.12"
-readme = "README.md"
+# No `readme = "README.md"` here on purpose: this package is only ever
+# `pip install`ed locally (editable, for dev) or baked into the Docker
+# image, never published anywhere a rendered README would matter — and the
+# Dockerfile deliberately does NOT COPY README.md into the build (see
+# .dockerignore), so declaring it here would break `pip install .` inside
+# the actual container build with "Readme file does not exist" (hatchling
+# validates the referenced file exists at build time). Caught by actually
+# simulating the Dockerfile's exact COPY list before shipping this, not by
+# inspection — `pip install -e .` from the full checkout never hits this,
+# only a build from the Dockerfile's narrower file set does.
 
 # First Python code in this repo (2026-09-01) — this pyproject.toml sets the
 # convention platform-sdk and platform-cli are expected to follow: plain

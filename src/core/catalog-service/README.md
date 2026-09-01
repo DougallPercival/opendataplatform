@@ -29,7 +29,9 @@ thing. See "Not yet built" below for what's deliberately left for the next steps
 - `tests/` — `test_visibility.py` (pure logic, no DB) and `test_datasets_api.py` (integration,
   needs a real Postgres — see that file's docstring for a one-line `docker run` to get one).
 - `Dockerfile` — builds and runs today (`docker build . && docker run -p 8000:8000 ...` against any
-  reachable Postgres with migrations applied), not yet referenced by anything in `argocd/`.
+  reachable Postgres with migrations applied). Now also what `.github/workflows/ci.yml` builds and
+  pushes to `ghcr.io/dougallpercival/catalog-service`, and what
+  `../argocd/manifests/catalog-service.yaml`'s Deployment and migration Job actually run in-cluster.
 
 ## Running locally
 
@@ -51,17 +53,21 @@ operator (1.30, well past the CRD's 1.24 introduction) already offers it. `boots
 generates `platform-postgres-catalog-credentials` the same way it generates the Keycloak one, and
 Reflector mirrors it into `catalog-service` for whenever a Deployment reads it.
 
+## Deployment (in-cluster)
+
+`.github/workflows/ci.yml` tests, then builds and pushes the image to `ghcr.io/dougallpercival/
+catalog-service` on every push to `dev`/`test`/`main` — tag matches the branch name, per
+ARCHITECTURE.md §10's promotion model. **One manual, one-time step after the first successful
+push:** GHCR packages default to private regardless of the source repo's visibility — go to the
+package's Settings → Change visibility → Public (irreversible — can't go back to private once
+public). See `docs/known-issues.md`.
+
+`../argocd/manifests/catalog-service.yaml` (Argo CD Application `catalog-service`, wave 3) runs a
+PreSync `alembic upgrade head` Job against the `catalog` database, then a 1-replica Deployment +
+ClusterIP Service — deliberately no Ingress, see `docs/known-issues.md`'s auth entry below.
+
 ## Not yet built
 
-- **Deployment/Service/Ingress + an Argo CD Application.** Blocked on a real decision, not
-  forgotten: where does the built image live? (GHCR under this repo's GitHub org is the obvious
-  default — matches `git@github.com:DougallPercival/opendataplatform.git` already being GitHub —
-  but that's a decision worth making deliberately, along with whether `.github/workflows/ci.yml`
-  builds+pushes it on merge, before wiring a Deployment that pulls from somewhere.) Until then this
-  runs locally (`uvicorn app.main:app --reload`) or via the Dockerfile directly.
-- **A migration Job.** Once there's a Deployment, it needs something to run `alembic upgrade head`
-  before the app starts — same shape as `postgres-backup.yaml`'s bucket-creation Job, using this
-  same image with a different command (see the Dockerfile's own comment).
 - **Real auth.** See `app/deps.py`'s docstring.
 - **Membership/roles on workspaces** (owner/editor/viewer, §4's table) — `platform workspace
   invite`, tied to Keycloak group membership, not built yet; today `POST /workspaces` just creates
