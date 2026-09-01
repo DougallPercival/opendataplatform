@@ -28,6 +28,23 @@ actually needs it" reasoning as everywhere else in this repo. `platform module s
 ARCHITECTURE.md §3/§7 is unrelated future scope (module lifecycle, not catalog data) — not part of
 this package's current slice either.
 
+## Requirements
+
+**Python 3.12+** (`requires-python` in `pyproject.toml`, matching `platform-sdk` and
+`catalog-service`). Confirmed the hard way, not hypothetically: installing this on `homelab-dev`
+(Rocky Linux 9.4) against its default `python3` (3.9.19) failed with `requires a different Python`.
+Rocky/Alma/RHEL 9.x ship Python 3.12 directly from AppStream, no EPEL needed:
+
+```bash
+sudo dnf install python3.12
+python3.12 -m venv ~/.venvs/platform
+source ~/.venvs/platform/bin/activate
+```
+
+(Ubuntu 22.04 ships 3.10, same problem, different fix — `sudo apt install python3.12` or the
+deadsnakes PPA; macOS — `brew install python@3.12`. See `catalog-service/README.md`'s "Running
+locally" section for the full per-OS list; not repeated here to avoid the two copies drifting.)
+
 ## Local dev setup
 
 Two editable installs, in this order — `platform-cli` depends on `platform-sdk` by name with no
