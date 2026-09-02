@@ -1,27 +1,40 @@
-"""FastAPI dependencies — currently just one, and it's a placeholder.
+"""FastAPI dependencies — currently just one.
 
-get_current_principal reads three plain headers instead of verifying a
-Keycloak JWT. That's deliberate for THIS step (ARCHITECTURE.md's Phase 2
-kickoff is "catalog-lite's data model first" — gateway/auth integration is
-its own piece of work, not yet built: see ../gateway/README.md). Real auth
-lands when platform-gateway starts proxying requests here — it's the
-natural place to verify the JWT once (already true for every other module
-it proxies to, per ARCHITECTURE.md §3) and forward the verified identity
-downstream as trusted headers, the same shape this already expects. Nothing
-in visibility.py or the routers needs to change when that happens — only
-this function.
+get_current_principal reads three plain headers rather than verifying a
+Keycloak JWT itself — and, as of platform-gateway-auth (2026-09-02), that's
+no longer a placeholder to feel uneasy about: it's the correct, permanent
+shape. platform-gateway now sits in front of this service, verifies every
+caller's Keycloak JWT itself (JWKS-checked signature, issuer, expiry — see
+src/core/gateway/app/auth.py), and forwards exactly the three headers this
+function already expected — X-Workspace, X-User, X-Role — but now
+GATEWAY-DERIVED rather than client-declared: X-User/X-Role come straight off
+the verified token's claims (never anything a caller sent), and X-Workspace,
+while still a client-supplied hint, has already been checked by gateway
+against that same token's `groups` claim before it ever reaches here (no
+match → gateway itself 403s, this function never sees the request). Nothing
+in visibility.py, the routers, or this function needed to change for real
+auth to land — that was the point of designing it this way from the start:
+only the identity of whatever sits in front of catalog-service changed, not
+this trust boundary's shape.
 
-X-Role is the newest of the three (2026-09-01, membership/roles work) and
-mirrors the same shape: src/core/auth/realm-platform.yaml's Keycloak groups
-already encode workspace + role together as one path
-(/workspaces/<name>/<role>), so a verified JWT's group/role claim is exactly
-what a real gateway would forward here — this header just anticipates that
-shape ahead of the gateway existing to produce it for real.
+X-Role's mapping still mirrors src/core/auth/realm-platform.yaml's Keycloak
+groups directly: those groups encode workspace + role together as one path
+(/workspaces/<name>/<role>), which is exactly the claim gateway reads to
+derive X-Role — one definition of what a role means, expressed once in
+Keycloak, not reimplemented here.
 
-Until then: no verification, anyone can claim to be anyone, in any role.
-Fine for local dev and for exercising the schema; NOT fine to expose this
-service directly past a cluster boundary before gateway sits in front of it.
-Tracked in docs/known-issues.md.
+What this means in practice: catalog-service's own trust boundary is now
+"whatever reaches me on my ClusterIP already went through gateway's
+verification" — true for any request coming from `platform-cli` (which only
+ever talks to gateway; see platform_sdk/client.py), but NOT yet true at the
+network layer. Nothing in this cluster currently stops another in-cluster
+pod from reaching catalog-service's Service directly and forging these same
+three headers — k3s's bundled NetworkPolicy controller is enabled by
+default and WOULD enforce a policy restricting ingress to gateway's
+namespace only, but no such policy has been written yet. That's the one
+gap this branch doesn't close; see docs/known-issues.md for the tracked
+follow-up. DEFAULT_ROLE below (Role.OWNER when X-Role is absent) matters
+more now than it used to for exactly this reason — see its own comment.
 """
 from __future__ import annotations
 
@@ -35,12 +48,21 @@ from app.visibility import Principal, Role
 DEFAULT_WORKSPACE = "personal"
 DEFAULT_USER = "anonymous"
 # Owner, not viewer — matches DEFAULT_WORKSPACE/DEFAULT_USER's existing
-# "frictionless by default" choice. Role enforcement is new; defaulting to
-# the least-privileged role would silently 403 every existing caller (every
-# test, every curl example in every README) that predates X-Role and has no
-# reason to know it exists yet. An explicit X-Role: viewer is how you
-# actually exercise the read-only path — see tests/test_visibility.py and
-# tests/test_datasets_api.py.
+# "frictionless by default" choice, and still needed for local dev / this
+# service's own test suite (curl by hand, tests/test_visibility.py,
+# tests/test_datasets_api.py — none of which sit behind gateway).
+#
+# Sharper edge now that platform-gateway-auth (2026-09-02) is real, worth
+# restating plainly: gateway ALWAYS sends an explicit X-Role for every
+# request it forwards (derived from the caller's verified token — see this
+# module's docstring) and must never omit it. If gateway ever did omit it,
+# this default would silently grant that request Owner — a real
+# privilege-escalation path, not a hypothetical one, since Owner is the
+# most-privileged role there is. Nothing here can enforce "gateway always
+# sends X-Role" from catalog-service's side; that invariant lives in
+# gateway's own code (src/core/gateway/app/auth.py's derive_headers) and is
+# exactly why that function is designed to raise rather than return a
+# request with role omitted.
 DEFAULT_ROLE = Role.OWNER
 
 

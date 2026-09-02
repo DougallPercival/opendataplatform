@@ -1,57 +1,85 @@
-"""PlatformClient — a thin, synchronous wrapper over catalog-service's REST
-API. "Thin" on purpose: this does exactly what a `curl` command hitting the
-same endpoint would do, plus typed request/response shapes and one
-consistent error type (PlatformAPIError) instead of raw httpx exceptions —
-no caching, no retries, no batching. Add those only once something using
-this actually needs them, not speculatively.
+"""PlatformClient — a thin, synchronous wrapper over platform-gateway's REST
+API (which itself proxies to catalog-service — see gateway's own README).
+"Thin" on purpose: this does exactly what a `curl` command hitting the same
+endpoint would do, plus typed request/response shapes and one consistent
+error type (PlatformAPIError) instead of raw httpx exceptions — no caching,
+no retries, no batching. Add those only once something using this actually
+needs them, not speculatively.
 
 Synchronous, not async: platform-cli (this SDK's first real consumer) is a
 one-shot-command-then-exit CLI, where async buys nothing — every command
 does one thing and quits. Revisit if something long-lived and concurrent
-(e.g. a future TUI, or platform-sdk's own @platform.dataset decorators
-doing background registration) ever needs it; httpx supports both, so this
-isn't a one-way door.
+ever needs it; httpx supports both, so this isn't a one-way door.
 
-Auth is the same placeholder shape catalog-service's own app/deps.py
-expects on the other end: X-Workspace/X-User/X-Role headers, sent plainly,
-no verification either side. Real auth replaces what THIS file sends the
-same way it'll replace what deps.py reads — see that module's docstring.
+Auth (rewritten 2026-09-02, platform-gateway-auth branch): this used to send
+client-declared `X-Workspace`/`X-User`/`X-Role` headers straight through
+with zero verification on the other end — see this file's git history, or
+catalog-service's app/deps.py docstring, for that placeholder shape. Real
+auth replaces it: `PlatformClient` now sends a real Keycloak-issued
+`Authorization: Bearer <access_token>` (from `platform login`'s saved
+credentials — see credentials.py) plus `X-Workspace` as a *hint*.
+`X-User`/`X-Role` are no longer sent at all — gateway derives both itself
+from the verified token (the `sub`/`preferred_username` and `groups` claims)
+and validates the `X-Workspace` hint against `groups` before trusting it
+(403 if there's no matching membership). Nothing this class sends is trusted
+on faith anymore; that trust boundary moved to gateway, which is the whole
+point of this branch — see src/core/gateway/app/auth.py.
+
+No `user`/`role` constructor args or PLATFORM_USER/PLATFORM_ROLE settings
+exist anymore (config.py's docstring covers why removing them, not just
+ignoring them, was the right call). Not logged in? `PlatformClient` raises
+`NotAuthenticatedError` the first time it needs to send a request, naming
+the fix (`platform login`) rather than a bare 401 from gateway.
 """
 from __future__ import annotations
 
-import getpass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 import httpx
 
 from platform_sdk.config import SDKSettings
-from platform_sdk.exceptions import PlatformAPIError
-from platform_sdk.models import Dataset, Principal, Visibility, Workspace
+from platform_sdk.credentials import load_credentials, save_credentials
+from platform_sdk.exceptions import NotAuthenticatedError, PlatformAPIError
+from platform_sdk.keycloak_login import KeycloakLoginFlow
+from platform_sdk.models import Dataset, Principal, TokenSet, Visibility, Workspace
+
+# How close to actual expiry counts as "near-expiry" and triggers a silent
+# refresh before the request goes out, rather than sending a token that's
+# likely to 401 mid-flight. 30s is generous relative to how long a single
+# `platform` command takes to run (well under a second of actual gateway
+# round-trip time) — this isn't tuned finer than that because it doesn't
+# need to be: too-small only risks an occasional avoidable 401-then-retry
+# gateway would otherwise have to handle, too-large only means refreshing a
+# few requests earlier than strictly necessary.
+_TOKEN_REFRESH_BUFFER = timedelta(seconds=30)
 
 
 class PlatformClient:
     def __init__(
         self,
         *,
-        catalog_url: str | None = None,
+        gateway_url: str | None = None,
         workspace: str | None = None,
-        user: str | None = None,
-        role: str | None = None,
         settings: SDKSettings | None = None,
         timeout: float = 10.0,
     ) -> None:
         # Explicit constructor args win over settings (env vars) over
-        # hardcoded fallbacks — same precedence order a CLI flag / env var /
-        # default chain usually takes, so platform-cli's own --workspace
-        # flag (once it has one) can override PLATFORM_WORKSPACE without
-        # this class needing to know CLI flags exist.
+        # hardcoded fallbacks — same precedence order platform-cli's own
+        # --workspace/--gateway-url flags rely on without this class needing
+        # to know CLI flags exist.
         settings = settings or SDKSettings()
-        self._base_url = (catalog_url or settings.catalog_url).rstrip("/")
+        self._settings = settings
+        self._base_url = (gateway_url or settings.gateway_url).rstrip("/")
         self._workspace = workspace or settings.workspace
-        self._user = user or settings.user or getpass.getuser()
-        self._role = role or settings.role
         self._http = httpx.Client(base_url=self._base_url, timeout=timeout)
+        # Loaded (and refreshed, if needed) at most once per PlatformClient
+        # instance — see _ensure_token()'s own comment for why this is a
+        # deliberate "one check per invocation," not a re-check-every-call
+        # or a check-once-per-process cache.
+        self._token_set: TokenSet | None = None
+        self._token_checked = False
 
     def close(self) -> None:
         self._http.close()
@@ -62,16 +90,51 @@ class PlatformClient:
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
+    # ---- auth -----------------------------------------------------------
+    def _ensure_token(self) -> TokenSet:
+        # A one-shot-command-then-exit CLI only ever needs to decide "is my
+        # token still good enough for this run" once — there's no long-lived
+        # process here where a token could go stale mid-lifetime the way a
+        # server's would. So this checks (and refreshes, if needed) the
+        # first time any command actually sends a request, then reuses that
+        # same TokenSet for every remaining request this instance makes.
+        if self._token_checked:
+            assert self._token_set is not None
+            return self._token_set
+
+        token_set = load_credentials()
+        if token_set is None:
+            raise NotAuthenticatedError("Not logged in — run `platform login` first.")
+
+        if token_set.expires_at - datetime.now(UTC) < _TOKEN_REFRESH_BUFFER:
+            if not token_set.refresh_token:
+                raise NotAuthenticatedError(
+                    "Saved credentials have expired and there's no refresh token to renew them with "
+                    "— run `platform login` again."
+                )
+            # KeycloakLoginFlow's own port-forward/hostname-patch machinery
+            # (see that module's docstring) — a real but short-lived cost,
+            # paid only on the rare invocation that lands within
+            # _TOKEN_REFRESH_BUFFER of expiry, not on every command.
+            with KeycloakLoginFlow(settings=self._settings) as flow:
+                token_set = flow.refresh(token_set.refresh_token)
+            save_credentials(token_set)
+
+        self._token_set = token_set
+        self._token_checked = True
+        return token_set
+
     def _headers(self) -> dict[str, str]:
-        headers = {"X-Workspace": self._workspace, "X-User": self._user}
-        # Omitted, not sent-empty, when unset — an empty X-Role header
-        # would fail app/deps.py's Role(x_role.lower()) parse (empty
-        # string isn't a valid role) instead of falling through to its
-        # own DEFAULT_ROLE the way a genuinely absent header does. See
-        # config.py's role field docstring for why unset is the default.
-        if self._role:
-            headers["X-Role"] = self._role
-        return headers
+        token_set = self._ensure_token()
+        # X-Workspace is a HINT, not a trust boundary — gateway validates it
+        # against the token's own `groups` claim and 403s if there's no
+        # matching membership (see gateway/app/auth.py). Sending it at all
+        # is what preserves the existing --workspace-flag UX; nothing about
+        # its presence here makes it authoritative.
+        return {
+            "Authorization": f"Bearer {token_set.access_token}",
+            "X-Workspace": self._workspace,
+        }
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         response = self._http.request(method, path, headers=self._headers(), **kwargs)

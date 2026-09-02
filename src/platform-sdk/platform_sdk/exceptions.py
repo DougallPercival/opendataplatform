@@ -30,3 +30,26 @@ class KeycloakAdminError(Exception):
     even though the failure modes are more varied (this talks to kubectl and
     a port-forward, not just HTTP) — platform-cli still only needs to catch
     one thing."""
+
+
+class PlatformLoginError(Exception):
+    """Raised for anything that goes wrong during `platform login`'s
+    device-flow (keycloak_login.py) — the device-authorization request
+    itself failing, an unexpected token-endpoint response, or the RFC 8628
+    poll loop ending in `access_denied`/`expired_token`. Also raised by a
+    silent token refresh (PlatformClient's near-expiry check) when the
+    refresh_token itself has been revoked or expired — same "something about
+    getting/renewing a token went wrong" category, so it's the same
+    exception type rather than a second one platform-cli would need to catch
+    separately."""
+
+
+class NotAuthenticatedError(Exception):
+    """Raised by `PlatformClient` when no credentials file exists yet (or
+    the one on disk is missing/unreadable/corrupt) — the fix is always
+    "run `platform login`," never a retry, so this is deliberately a
+    distinct type from PlatformLoginError: that one fires *during* `platform
+    login` itself, this one fires when some other command discovers there's
+    nothing to authenticate with in the first place. Keeping them separate
+    lets platform-cli's error handler print the right one-line fix for each
+    case instead of one generic "auth failed" message."""

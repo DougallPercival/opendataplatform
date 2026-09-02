@@ -10,6 +10,7 @@ README for why.
 ## Phase 2, this pass (2026-09-01): the same minimal slice platform-sdk covers
 
 ```text
+platform login
 platform me
 platform workspace list
 platform workspace create NAME [--display-name TEXT]
@@ -26,6 +27,33 @@ functions incl. publish/promote, lineage) — same "add it when platform-cli act
 reasoning as everywhere else in this repo. `platform module scaffold/install` from ARCHITECTURE.md
 §3/§7 is unrelated future scope (module lifecycle, not catalog data) — not part of this package's
 current slice either.
+
+## Real auth: `platform login` (2026-09-02, platform-gateway-auth branch)
+
+```text
+platform login
+```
+
+**Breaking change** — the flags every other command used to accept for identity/role are gone:
+`--user`/`--role`/`PLATFORM_USER`/`PLATFORM_ROLE` no longer exist at all, and `--catalog-url`/
+`PLATFORM_CATALOG_URL` are renamed to `--gateway-url`/`PLATFORM_GATEWAY_URL`. This is the actual
+point of this branch, not an oversight: identity and role are no longer anything `platform-cli`
+declares — `platform-gateway` derives both from a real, verified Keycloak token, and every command
+that talks to catalog-service now goes through gateway instead of reaching it directly (see
+`platform_sdk/client.py`'s and `../core/catalog-service/app/deps.py`'s module docstrings for the full
+story). Running `platform --user alice ...` now fails with "no such option" rather than silently
+doing nothing.
+
+`platform login` is how you get that token: opens (or prints, if you're on a headless/SSH session) a
+Keycloak verification URL, waits for you to approve it in a browser, and saves the result to
+`~/.config/platform/credentials.json` for every other `platform` command to read back automatically.
+No password ever touches this CLI. Safe to re-run any time — always replaces whatever was saved
+before. Every other command now needs this run at least once first; without it, they fail fast with
+"Not logged in — run `platform login` first" rather than a confusing 401 from gateway.
+
+Uses a separate, public Keycloak client (`platform-cli-login`,
+`bootstrap/keycloak-bootstrap-login-client.sh`) from the one `workspace invite` below uses — see that
+script's header comment for why the two are deliberately never merged into one.
 
 ## Workspace invites (2026-09-01)
 
@@ -86,24 +114,28 @@ pip install -e ../platform-sdk
 pip install -e ".[dev]"
 ```
 
-Then point it at a running `catalog-service` (see that service's own README for `uvicorn
-app.main:app --reload`) via env vars — no CLI flag or config file needed for the common case, though
-`--workspace`/`--user`/`--role`/`--catalog-url` override them per-invocation:
+Then log in once and point the CLI at a running `platform-gateway` (see `../gateway/README.md` for
+`uvicorn app.main:app --reload`, and that service's own env vars for pointing it at Keycloak +
+catalog-service in turn) via env vars — no CLI flag or config file needed for the common case, though
+`--workspace`/`--gateway-url` override them per-invocation:
 
 ```bash
-export PLATFORM_CATALOG_URL=http://localhost:8000
+export PLATFORM_GATEWAY_URL=http://localhost:8080
 export PLATFORM_WORKSPACE=personal
-export PLATFORM_USER=alice   # optional — defaults to your OS username
 
+platform login          # once — opens a browser verification URL, saves credentials
 platform me
 platform dataset create reddit-sentiment --visibility public --description "raw pulls"
 platform dataset list
 ```
 
-Verified working end-to-end against a real running `catalog-service` + Postgres during development —
-`platform dataset create` / `list` / `get` / `update` / `delete`, `platform workspace list`, and a
-`PLATFORM_ROLE=viewer` run correctly getting rejected with `catalog-service error (403): Viewers
-cannot create entries.` — not just the mocked test suite below.
+Verified working end-to-end against a real running `catalog-service` + Postgres during development,
+before this branch's gateway/token-auth rewrite — `platform dataset create` / `list` / `get` /
+`update` / `delete`, `platform workspace list`, and a `PLATFORM_ROLE=viewer` run correctly getting
+rejected with `catalog-service error (403): Viewers cannot create entries.` (that specific env var no
+longer exists — see "Real auth" above; a viewer-role rejection now depends on real Keycloak group
+membership instead, confirmed the same way once `platform-gateway` is live — see this branch's plan
+verification steps).
 
 ## Running its tests
 
@@ -119,3 +151,10 @@ a fake — no network, no live `catalog-service` needed, same reasoning as `plat
 transport-mocked tests (see that package's README): this suite's job is "does the CLI wire flags,
 output, and errors correctly around *a* client," not "does `PlatformClient` talk HTTP correctly"
 (that's `platform-sdk`'s job) or "does `catalog-service` work" (that's `catalog-service`'s job).
+
+As of 2026-09-02's real-auth work, the same file also covers `platform login` the same way — a
+`FakeLoginFlow` monkeypatched onto `platform_cli.login.KeycloakLoginFlow` (no real device flow, no
+network) — verifying the verification-URL/code output, the success/failure paths, and, separately,
+that `--user`/`--role`/`--catalog-url` now fail with Typer's own "no such option" rather than being
+silently accepted and ignored (`test_removed_flags_are_rejected_not_silently_ignored`) — the actual
+proof that this branch's breaking change took effect, not just that the new command works.

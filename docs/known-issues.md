@@ -442,24 +442,93 @@ applies on the one machine whose hosts file you edited. Once `platform-gateway` 
 (`192.168.4.240`, from `metallb-pool.yaml`) instead of the homelab box's own address — update or
 remove this entry at that point rather than leaving it pointed at the wrong place.
 
-### `catalog-service`'s auth is a placeholder — don't expose it past the cluster boundary yet
+### `catalog-service`'s auth was a placeholder — closed at the application layer, still open at the network layer
 
-Added 2026-09-01, Phase 2 kickoff; updated 2026-09-01 (same day) when role enforcement landed.
-`src/core/catalog-service/app/deps.py`'s `get_current_principal` trusts three plain headers
-(`X-Workspace`, `X-User`, and now `X-Role`) with no verification at all — anyone who can reach the
-service can claim to be any workspace, as any user, in any role (including `owner`, the default),
-and read/write accordingly. This isn't a bug to fix in that file; it's an intentionally deferred
-seam. Real auth is `platform-gateway`'s job once it exists and proxies here (see that module's own
-README and `catalog-service/app/deps.py`'s docstring for the intended shape — gateway verifies the
-Keycloak JWT once, the way it already will for every other module per ARCHITECTURE.md §3, reading
-the group/role claim `src/core/auth/realm-platform.yaml`'s groups already encode, and forwards the
-verified identity downstream as trusted headers this same function keeps reading).
+Added 2026-09-01, Phase 2 kickoff; updated 2026-09-01 (same day) when role enforcement landed;
+**updated again 2026-09-02 (platform-gateway-auth branch) — the application-layer half of this gap
+is now closed, read on for what's still open.**
 
-**Status:** not a bug, a documented gap. **Do not** put `catalog-service` behind an `Ingress`, a
-`LoadBalancer` Service, or anything else reachable off-cluster before `platform-gateway` sits in
-front of it — today it's only meant to be reached from inside the cluster (or `localhost` during
-local dev, per its own README), where "anyone who can reach it" is a much smaller set of things
-than "anyone on your network."
+`src/core/catalog-service/app/deps.py`'s `get_current_principal` still reads three plain headers
+(`X-Workspace`, `X-User`, `X-Role`) with no verification of its own — but as of this branch, that's
+no longer a placeholder to worry about. `platform-gateway` now sits in front of catalog-service for
+real, verifies every caller's Keycloak JWT (signature via JWKS, expiry, issuer —
+`src/core/gateway/app/auth.py`), and is the only thing that ever sets those three headers on a
+request that reaches catalog-service — `X-User`/`X-Role` are derived straight from the verified
+token, never anything a caller declared; `X-Workspace` stays a client-supplied hint but gateway
+checks it against the token's `groups` claim before trusting it (403 if there's no match). Any
+request routed through gateway (which is everything `platform-cli` sends — see
+`platform_sdk/client.py`) can no longer forge identity or role. See `deps.py`'s own docstring for
+the full picture from catalog-service's side.
+
+**What's still open, and why this entry isn't fully resolved yet:** nothing in the cluster currently
+stops another in-cluster pod from reaching catalog-service's `ClusterIP` Service *directly*,
+bypassing gateway entirely, and forging the exact same three headers gateway would otherwise
+control. k3s ships a Network Policy controller enabled by default alongside Flannel —
+`NetworkPolicy` resources ARE genuinely enforced on this cluster, not a silent no-op — but no policy
+restricting catalog-service's namespace ingress to gateway's namespace has been written yet. That's
+real, actionable follow-up work (not a "someday, if it ever matters" caveat), just not part of this
+branch. A `NetworkPolicy` in `catalog-service`'s namespace allowing ingress only from pods in the
+`gateway` namespace (matched by namespace label, e.g. `kubernetes.io/metadata.name: gateway`) would
+close it.
+
+**Status:** application-layer gap closed by this branch. **Do not** put `catalog-service` behind an
+`Ingress`, a `LoadBalancer` Service, or anything else reachable off-cluster until the NetworkPolicy
+above exists too — today "anyone who can reach it" is still "any pod on this cluster," not yet
+narrowed to "anyone who went through gateway."
+
+### `platform-cli-login`'s device-grant fields — one Keycloak-version detail confirmed only at bootstrap-script-run time
+
+Added 2026-09-02, platform-gateway-auth branch. `bootstrap/keycloak-bootstrap-login-client.sh`
+creates the public client `platform login`'s device flow authenticates against. Keycloak's
+`ClientRepresentation` has a top-level `oauth2DeviceAuthorizationGrantEnabled` boolean for enabling
+RFC 8628, but that field 400'd with an "Unrecognized field" error on at least one real Keycloak
+version in the wild ([keycloak/keycloak#19688](https://github.com/keycloak/keycloak/issues/19688),
+reported against v21.0.2) — this cluster's Operator is pinned to 26.7.2, which may or may not still
+hit it; nothing found while researching this said definitively either way for that specific version,
+so the script doesn't gamble on it. The underlying, always-supported mechanism is the older
+attributes-map key `attributes["oauth2.device.authorization.grant.enabled"]`.
+
+**What the script actually does:** sends both the top-level field and the attributes key together on
+the first attempt (covers whichever Keycloak build wants the top-level field). If that specific
+request 400s naming `oauth2DeviceAuthorizationGrantEnabled` as an unrecognized property, it retries
+with just the attributes key and prints which path it took. Any other failure reason is surfaced as
+an error rather than silently retried further — same "verify before a live-mutating script depends
+on it, be upfront if you can't fully" discipline as `keycloak-bootstrap-cli-client.sh`'s own header
+comment describes for its `kcadm.sh`-adjacent Admin API calls.
+
+**Status:** not something to fix — it's inherent uncertainty about a specific Keycloak version's API
+surface, handled defensively rather than assumed away. If you run this script and see the "top-level
+field rejected, falling back" warning, that's expected on some builds, not a sign of a bigger
+problem — the client ends up correctly configured either way. Worth noting here which path this
+cluster's 26.7.2 Operator actually took, the first time this script runs for real, so a future reader
+doesn't have to rediscover it.
+
+### `keycloak-tls`'s Certificate needed the in-cluster Service DNS name added as a SAN
+
+Added 2026-09-02, platform-gateway-auth branch. `platform-gateway` connects directly to Keycloak's
+real in-cluster Service DNS name (`platform-service.keycloak.svc.cluster.local:8443`) to fetch the
+JWKS — deliberately NOT the port-forward + `curl --resolve`-equivalent trick
+`platform_sdk/_keycloak_connection.py`'s CLI-side tooling uses (that mechanism monkeypatches
+`socket.getaddrinfo` process-wide, fine for a one-shot CLI invocation, unsafe in a long-running
+concurrently-serving Deployment). Verified before relying on it, not assumed: Keycloak's
+`hostname-strict` behavior (`spec.hostname.hostname: keycloak.platform.local`, see the "Reaching
+Keycloak by raw IP" entry above) only governs URLs Keycloak itself *generates* — redirects, form
+actions, the `iss` claim in every token — it does NOT reject an incoming request based on its Host
+header or TLS SNI. A pure JWKS/JSON API call made directly against the in-cluster Service DNS name
+works fine at the application layer.
+
+The actual (and only) blocker was narrower: `keycloak-tls`'s `Certificate`
+(`manifests/keycloak-instance.yaml`) only listed `keycloak.platform.local` in `dnsNames` — a direct
+connection to `platform-service.keycloak.svc.cluster.local` failed *TLS hostname verification*, not
+the application-layer request itself.
+
+**Status:** fixed by adding `platform-service.keycloak.svc.cluster.local` and
+`platform-service.keycloak.svc` to that Certificate's `dnsNames` (both the fully-qualified and short
+in-cluster DNS forms, since which one a client presents as SNI/Host can depend on how the target is
+written in its own config). `platform-ca-secret` also needed Reflector annotations added
+(`manifests/cluster-issuer.yaml`'s `secretTemplate`) so its CA mirrors into gateway's namespace —
+gateway mounts only the `ca.crt` key from that mirrored Secret (never `tls.key`, the CA's private
+key — see `manifests/gateway.yaml`'s own comment for why that distinction matters).
 
 ### GHCR packages default to private on first publish — one manual step after `ci.yml`'s first push
 

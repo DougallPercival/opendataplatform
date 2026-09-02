@@ -59,6 +59,20 @@ spec:
 # for the pod to start regardless of ingress.enabled. Off platform-ca so it's
 # trusted the same way as every other cert on this cluster once that root is
 # imported (see manifests/cluster-issuer.yaml).
+#
+# The two svc.cluster.local names (added 2026-09-02) are for platform-gateway,
+# which connects to this Service's real in-cluster DNS name directly rather
+# than through the port-forward+`--resolve` trick platform_sdk's CLI-side
+# Keycloak tooling uses (fine for a one-shot CLI invocation, not safe
+# process-wide in a long-running concurrent Deployment — see
+# platform_sdk/_keycloak_connection.py's docstring). hostname.hostname above
+# (keycloak.platform.local) only governs the URLs Keycloak itself generates
+# (redirects, form actions) — it doesn't reject incoming requests by Host
+# header/SNI — so the actual and only blocker for a direct in-cluster
+# connection was this Certificate's SAN list not covering that DNS name.
+# Both the short (`.svc`) and fully-qualified (`.svc.cluster.local`) forms
+# are listed since Kubernetes clients may present either as the SNI/Host
+# depending on how the target is written in config.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -68,6 +82,8 @@ spec:
   secretName: keycloak-tls
   dnsNames:
     - keycloak.platform.local
+    - platform-service.keycloak.svc.cluster.local
+    - platform-service.keycloak.svc
   issuerRef:
     name: platform-ca
     kind: ClusterIssuer

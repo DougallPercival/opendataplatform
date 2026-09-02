@@ -1,30 +1,58 @@
 """Unit tests for PlatformClient — mocked at the HTTP transport level via
-respx, not run against a live catalog-service. Deliberate: this package's
-job is "does PlatformClient send the right request and parse the right
-response," not "does catalog-service work" (that's catalog-service's own
-test suite, against a real Postgres, over in src/core/catalog-service/tests/).
+respx, not run against a live gateway. Deliberate: this package's job is
+"does PlatformClient send the right request and parse the right response,"
+not "does gateway/catalog-service work" (those get their own test suites).
 Keeping this SDK's tests transport-mocked means its CI job never needs a
-Postgres service container the way catalog-service's does — a real
-dependency-shape difference between a service and a client library, not
-laziness.
+live cluster the way a real end-to-end run does.
+
+Credentials are mocked too (`platform_sdk.client.load_credentials`/
+`save_credentials` monkeypatched, never a real ~/.config/platform/
+credentials.json) — same reasoning, one layer up: this suite's job isn't
+"does credentials.py read/write a file correctly" (that's
+test_credentials.py's job) or "does the device flow work" (test_keycloak_
+login.py's), just "does PlatformClient use whatever TokenSet it's handed
+correctly."
 """
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 import respx
 
-from platform_sdk import PlatformAPIError, PlatformClient, Visibility
+from platform_sdk import NotAuthenticatedError, PlatformAPIError, PlatformClient, TokenSet, Visibility
 
-BASE_URL = "http://catalog.test"
+BASE_URL = "http://gateway.test"
+
+
+def _token_set(**overrides) -> TokenSet:
+    kwargs = {
+        "access_token": "at-1",
+        "refresh_token": "rt-1",
+        "expires_at": datetime.now(UTC) + timedelta(hours=1),  # comfortably not near-expiry
+        "preferred_username": "alice",
+    }
+    kwargs.update(overrides)
+    return TokenSet(**kwargs)
 
 
 @pytest.fixture
-def client():
-    c = PlatformClient(catalog_url=BASE_URL, workspace="personal", user="alice")
+def valid_credentials(monkeypatch):
+    """Most tests don't care about the refresh path — this fixture gives
+    them a token that's nowhere near expiry, so _ensure_token()'s refresh
+    branch never fires and save_credentials is never called."""
+    token_set = _token_set()
+    monkeypatch.setattr("platform_sdk.client.load_credentials", lambda: token_set)
+    save_calls: list[TokenSet] = []
+    monkeypatch.setattr("platform_sdk.client.save_credentials", save_calls.append)
+    return token_set, save_calls
+
+
+@pytest.fixture
+def client(valid_credentials):
+    c = PlatformClient(gateway_url=BASE_URL, workspace="personal")
     yield c
     c.close()
 
@@ -55,7 +83,7 @@ def _dataset_body(name: str = "reddit-sentiment", **overrides) -> dict:
 
 
 @respx.mock
-def test_headers_send_workspace_and_user_but_omit_role_by_default(client):
+def test_headers_send_bearer_token_and_workspace_hint_only(client):
     route = respx.get(f"{BASE_URL}/me").mock(
         return_value=httpx.Response(
             200, json={"workspace_id": str(uuid.uuid4()), "workspace_name": "personal",
@@ -64,24 +92,115 @@ def test_headers_send_workspace_and_user_but_omit_role_by_default(client):
     )
     client.me()
     sent = route.calls.last.request
+    assert sent.headers["authorization"] == "Bearer at-1"
     assert sent.headers["x-workspace"] == "personal"
-    assert sent.headers["x-user"] == "alice"
-    assert "x-role" not in sent.headers  # unset role -> header omitted, see client.py's docstring
+    # Never sent anymore — gateway derives identity/role from the verified
+    # token itself, not from anything the client declares. See client.py's
+    # module docstring for why this is the actual point of this branch.
+    assert "x-user" not in sent.headers
+    assert "x-role" not in sent.headers
+
+
+def test_no_credentials_file_raises_not_authenticated_error(monkeypatch):
+    monkeypatch.setattr("platform_sdk.client.load_credentials", lambda: None)
+    c = PlatformClient(gateway_url=BASE_URL, workspace="personal")
+    with pytest.raises(NotAuthenticatedError, match="platform login"):
+        c.me()
+    c.close()
+
+
+def test_expired_credentials_with_no_refresh_token_raises_not_authenticated_error(monkeypatch):
+    token_set = _token_set(refresh_token=None, expires_at=datetime.now(UTC) - timedelta(seconds=5))
+    monkeypatch.setattr("platform_sdk.client.load_credentials", lambda: token_set)
+    c = PlatformClient(gateway_url=BASE_URL, workspace="personal")
+    with pytest.raises(NotAuthenticatedError, match="platform login"):
+        c.me()
+    c.close()
 
 
 @respx.mock
-def test_role_header_sent_when_set():
-    c = PlatformClient(catalog_url=BASE_URL, workspace="personal", user="bob", role="viewer")
+def test_near_expiry_token_is_silently_refreshed_and_saved(monkeypatch):
+    near_expiry = _token_set(access_token="stale-at", expires_at=datetime.now(UTC) + timedelta(seconds=5))
+    monkeypatch.setattr("platform_sdk.client.load_credentials", lambda: near_expiry)
+    save_calls: list[TokenSet] = []
+    monkeypatch.setattr("platform_sdk.client.save_credentials", save_calls.append)
+
+    refreshed = _token_set(access_token="fresh-at")
+
+    class _FakeFlow:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return None
+
+        def refresh(self, refresh_token):
+            assert refresh_token == "rt-1"
+            return refreshed
+
+    monkeypatch.setattr("platform_sdk.client.KeycloakLoginFlow", lambda **kwargs: _FakeFlow())
+
     route = respx.get(f"{BASE_URL}/me").mock(
         return_value=httpx.Response(
             200, json={"workspace_id": str(uuid.uuid4()), "workspace_name": "personal",
-                       "user_id": "bob", "role": "viewer"}
+                       "user_id": "alice", "role": "owner"}
         )
     )
-    principal = c.me()
-    assert route.calls.last.request.headers["x-role"] == "viewer"
-    assert principal.role == "viewer"
+
+    c = PlatformClient(gateway_url=BASE_URL, workspace="personal")
+    c.me()
     c.close()
+
+    assert route.calls.last.request.headers["authorization"] == "Bearer fresh-at"
+    assert save_calls == [refreshed]
+
+
+@respx.mock
+def test_token_refresh_happens_at_most_once_per_client_instance(monkeypatch):
+    # _ensure_token() caches after its first call — a second request from
+    # the same PlatformClient instance must reuse the cached TokenSet, not
+    # refresh (or even re-read credentials.json) again.
+    near_expiry = _token_set(access_token="stale-at", expires_at=datetime.now(UTC) + timedelta(seconds=5))
+    load_calls = {"count": 0}
+
+    def _load():
+        load_calls["count"] += 1
+        return near_expiry
+
+    monkeypatch.setattr("platform_sdk.client.load_credentials", _load)
+    monkeypatch.setattr("platform_sdk.client.save_credentials", lambda _ts: None)
+
+    refresh_calls = {"count": 0}
+    refreshed = _token_set(access_token="fresh-at")
+
+    class _FakeFlow:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return None
+
+        def refresh(self, refresh_token):
+            refresh_calls["count"] += 1
+            return refreshed
+
+    monkeypatch.setattr("platform_sdk.client.KeycloakLoginFlow", lambda **kwargs: _FakeFlow())
+
+    respx.get(f"{BASE_URL}/me").mock(
+        return_value=httpx.Response(
+            200, json={"workspace_id": str(uuid.uuid4()), "workspace_name": "personal",
+                       "user_id": "alice", "role": "owner"}
+        )
+    )
+    respx.get(f"{BASE_URL}/workspaces").mock(return_value=httpx.Response(200, json=[]))
+
+    c = PlatformClient(gateway_url=BASE_URL, workspace="personal")
+    c.me()
+    c.list_workspaces()
+    c.close()
+
+    assert load_calls["count"] == 1
+    assert refresh_calls["count"] == 1
 
 
 @respx.mock
@@ -140,19 +259,17 @@ def test_404_surfaces_as_platform_api_error_with_status_and_detail(client):
 
 
 @respx.mock
-def test_403_from_viewer_role_surfaces_correctly():
-    c = PlatformClient(catalog_url=BASE_URL, workspace="personal", user="bob", role="viewer")
+def test_403_from_gateway_role_check_surfaces_correctly(client):
     respx.post(f"{BASE_URL}/datasets").mock(
         return_value=httpx.Response(403, json={"detail": "Viewers cannot create entries."})
     )
     with pytest.raises(PlatformAPIError) as exc_info:
-        c.create_dataset("nope")
+        client.create_dataset("nope")
     assert exc_info.value.status_code == 403
-    c.close()
 
 
 def test_client_is_a_context_manager():
-    with PlatformClient(catalog_url=BASE_URL) as c:
+    with PlatformClient(gateway_url=BASE_URL) as c:
         assert c is not None
     # __exit__ closed the underlying httpx.Client — a second close() is a
     # harmless no-op (httpx's own contract), just confirming this doesn't
