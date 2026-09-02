@@ -41,6 +41,44 @@ spec:
   # whatever IP ingress-nginx picks up from metallb-pool.yaml.
   hostname:
     hostname: keycloak.platform.local
+  # Pins the PORT Keycloak stamps into every URL it generates (redirects,
+  # device-flow verification_uri, and critically the `iss` claim of every
+  # token it issues) — hostname.hostname above only pins the hostname part.
+  # Without this, Keycloak infers the port from whatever request it's
+  # currently handling, which is fine for one-off Admin API calls
+  # (bootstrap scripts, KeycloakAdminClient) but breaks `platform login`:
+  # found live, 2026-09-02 — every token minted through the CLI's own
+  # ephemeral port-forward carried an `iss` claim tied to that exact
+  # ephemeral port, which could never match platform-gateway's fixed
+  # GATEWAY_KEYCLOAK_PUBLIC_URL (see manifests/gateway.yaml), so every
+  # request 401'd with "Invalid issuer." This CRD version has no typed
+  # hostname.port field (confirmed via `kubectl explain
+  # keycloak.spec.hostname --recursive` against the live cluster before
+  # relying on it) — additionalOptions is the Operator's documented
+  # escape hatch for passing raw Keycloak server options
+  # (https://www.keycloak.org/server/all-config) straight through as
+  # KC_* env vars, confirmed present via `kubectl explain
+  # keycloak.spec.additionalOptions --recursive` the same way.
+  #
+  # 18444 matches platform_sdk/config.py's keycloak_login_local_port —
+  # `platform login`'s own dedicated local port-forward — so its forward
+  # doubles as the browser-facing endpoint too, no separate manual
+  # port-forward needed just for login. Deliberately NOT 8443 (Keycloak's
+  # real internal port, and the port already used for manual admin-console
+  # access) to avoid exactly the kind of stale/colliding-forward bug
+  # already hit once this session with keycloak-bootstrap-login-client.sh's
+  # own port-forward — a separate, dedicated port avoids that class of
+  # problem entirely rather than relying on remembering to close things in
+  # the right order.
+  #
+  # Interim, not permanent: this whole pin goes away once this cluster has
+  # a real Ingress in front of Keycloak (see the hostname.hostname comment
+  # above, and docs/known-issues.md's "Reaching Keycloak by raw IP" entry)
+  # — at that point Keycloak serves on the Ingress's standard port and
+  # omits it from generated URLs entirely, same as any normal HTTPS site.
+  additionalOptions:
+    - name: hostname-port
+      value: "18444"
   http:
     tlsSecret: keycloak-tls
   db:

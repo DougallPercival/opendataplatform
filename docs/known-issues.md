@@ -627,6 +627,58 @@ by raw IP" entry's closing note). Consistent with this repo's existing homelab/t
 model (MetalLB's pool, no firewall by default) — flagged here rather than assumed acceptable without
 saying so.
 
+### `platform login`'s tokens failed gateway's issuer check — same port-reflection behavior, a third symptom
+
+Found 2026-09-02, platform-gateway-auth branch, same live end-to-end pass — the third distinct
+failure mode traced back to Keycloak's hostname provider only pinning the *hostname* it uses in
+generated values, not the port (see the two entries above for the first two symptoms of the same root
+cause: the bootstrap script's device-grant fields entry is unrelated, but "Reaching Keycloak by raw
+IP" and the `platform login` verification-URL entry immediately above are the same mechanism). Once
+the verification URL was reachable and login completed successfully, `platform me` failed with
+`gateway error (401): Token failed verification: Invalid issuer`.
+
+Confirmed, not assumed: decoding the saved token's `iss` claim
+(`python3.12 -c "import json, base64; ..."` against `~/.config/platform/credentials.json`) showed
+`https://keycloak.platform.local:18444/realms/platform` — the CLI's own ephemeral local port-forward
+port, baked into the token by the same request-port-reflection behavior already confirmed above. This
+could never match `platform-gateway`'s `expected_issuer` (`gateway/app/config.py`, built from the
+fixed `GATEWAY_KEYCLOAK_PUBLIC_URL` — `https://keycloak.platform.local`, no port) — not a one-time
+fluke, every token obtained through any port-forward-based path would carry whatever ephemeral port
+that specific connection happened to use, so this was guaranteed to keep failing on every future
+`platform login` too, not just this one.
+
+**Status:** fixed by pinning the port Keycloak stamps into every generated URL/claim, decoupling it
+from whatever port a given request actually arrives on. This CRD version
+(`k8s.keycloak.org/v2alpha1`) has no typed `hostname.port`/`hostnamePort` field — confirmed via
+`kubectl explain keycloak.spec.hostname --recursive` against the live cluster before assuming one
+existed, same discipline as this file's other entries. The Keycloak Operator's documented escape
+hatch for passing raw server options (https://www.keycloak.org/server/all-config) straight through as
+`KC_*` env vars is `additionalOptions` — confirmed present the same way
+(`kubectl explain keycloak.spec.additionalOptions --recursive`) before relying on it.
+`manifests/keycloak-instance.yaml`'s `Keycloak` CR now sets
+`additionalOptions: [{name: hostname-port, value: "18444"}]` (→ `KC_HOSTNAME_PORT=18444`), and
+`manifests/gateway.yaml`'s `GATEWAY_KEYCLOAK_PUBLIC_URL` was updated to
+`https://keycloak.platform.local:18444` to match. `18444` was chosen deliberately, not arbitrarily: it
+matches `platform_sdk/config.py`'s `keycloak_login_local_port`, so `platform login`'s own dedicated
+port-forward doubles as the browser-facing endpoint with no separate manual forward needed — and it
+deliberately avoids `8443` (Keycloak's real internal port, and the port already used for manual
+admin-console access during this same live-testing session) specifically to avoid the class of
+stale/colliding-port-forward bug already hit once this session with
+`keycloak-bootstrap-login-client.sh`'s own leftover forward (see that entry, further up this file).
+
+**Interim, not permanent — same closing note as "Reaching Keycloak by raw IP" above:** this whole pin
+goes away once this cluster has a real Ingress in front of Keycloak. At that point Keycloak serves on
+the Ingress's standard port and omits it from generated URLs entirely (same as any normal HTTPS site),
+`additionalOptions`'s `hostname-port` entry should come out of `keycloak-instance.yaml`, and
+`GATEWAY_KEYCLOAK_PUBLIC_URL` goes back to no port. Leaving both in place after that point would be
+silently wrong, not just unnecessary — worth remembering to actually remove them, not just leave them
+as harmless-looking leftovers, when that Ingress work lands.
+
+**Not yet re-confirmed live as of this entry** — `homelab-dev` needs `git pull` to pick up both
+manifest changes, Argo CD needs to sync `keycloak-instance` and `gateway` again, and `platform login`
+needs a fresh run (the credentials saved before this fix carry the old, mismatched `iss` and won't
+retroactively start working — a new login is required, not just retrying `platform me`).
+
 ### GHCR packages default to private on first publish — one manual step after `ci.yml`'s first push
 
 Added 2026-09-01, alongside `.github/workflows/ci.yml` and `manifests/catalog-service.yaml`.

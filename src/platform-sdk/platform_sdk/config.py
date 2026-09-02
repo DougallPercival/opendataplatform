@@ -91,4 +91,20 @@ class SDKSettings(BaseSettings):
     # real, seen-elsewhere-in-this-repo source of flaky "address already in
     # use" failures (see keycloak-bootstrap-login-client.sh's own
     # PORT_FORWARD_LOCAL_PORT comment for the same reasoning applied there).
+    #
+    # NOT just a locally-scoped value, despite being framed above purely as
+    # a collision-avoidance choice: this number is also load-bearing on the
+    # cluster side. `KeycloakLoginFlow`'s forward binds 0.0.0.0 (so a
+    # human's browser can reach it), and Keycloak's hostname provider
+    # reflects the actual connection port into `verification_uri`/`iss` —
+    # so `src/core/argocd/manifests/keycloak-instance.yaml`'s Keycloak CR
+    # pins `additionalOptions: [{name: hostname-port, value: "18444"}]` to
+    # this exact same number, and `src/core/argocd/manifests/gateway.yaml`'s
+    # `GATEWAY_KEYCLOAK_PUBLIC_URL` includes `:18444` to match what that pin
+    # produces. All three have to agree (found live, 2026-09-02 — see
+    # docs/known-issues.md's "platform login's tokens failed gateway's
+    # issuer check" entry for the full chain of symptoms this mismatch
+    # caused). Changing this value without updating the other two silently
+    # reintroduces either an unreachable verification URL or a token-issuer
+    # mismatch — not a compile-time or test-time error, only a live one.
     keycloak_login_local_port: int = 18444
