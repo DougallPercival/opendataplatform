@@ -22,6 +22,12 @@ install in the right order and wait for the previous wave to go healthy first:
 capability — MetalLB's controller (wave 0) and its IP pool config (wave 1) still need to install in
 that order relative to *each other*, same reasoning as above.
 
+No new wave for real Ingress (platform-ingress branch, 2026-09-02): the `Ingress`/`Certificate`
+resources fronting Keycloak and gateway live as extra documents inside `manifests/keycloak-instance.yaml`
+and `manifests/gateway.yaml` themselves, not a dedicated `Application` — each of those `Application`s
+already syncs its one manifest file whole, so they ride along on waves 2 and 4 above with no table
+change. Don't go looking for a wave-5 Ingress entry; there isn't one.
+
 `postgres-operator`/`postgres-cluster` (CloudNativePG) are Phase 1 in ARCHITECTURE.md's build order, pulled forward into Phase 0 here because Keycloak needs a database before Phase 1 would otherwise provide one — see the comments in `manifests/postgres-cluster.yaml` and `keycloak-instance.yaml` for the reasoning. WAL-archive backups (`postgres-backup-plugin`, `postgres-backup`) followed once SeaweedFS existed to archive them to — see `manifests/postgres-backup.yaml`. `catalog-database` (Phase 2 kickoff, 2026-09-01) is the same `platform-postgres` cluster hosting a second database via CNPG's declarative `Database` CRD — see `manifests/catalog-database.yaml` and `src/core/catalog-service/README.md`. `catalog-service` is catalog-lite itself (the FastAPI service, not its database) — see `manifests/catalog-service.yaml` for the PreSync migration Job / Deployment / Service shape and `.github/workflows/ci.yml` for the image that Deployment pulls. `gateway` (platform-gateway-auth branch, 2026-09-02) verifies Keycloak JWTs and proxies to catalog-service with derived, trustworthy headers — see `manifests/gateway.yaml` for the Deployment/Service shape and `src/core/gateway/README.md` for what it does and doesn't cover yet.
 
 `manifests/` — plain Kubernetes resources (not Helm releases) that some of the `apps/` Applications
