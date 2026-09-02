@@ -40,3 +40,30 @@ class SDKSettings(BaseSettings):
     # (or restrict yourself to) a specific role, e.g. testing the CLI as a
     # viewer.
     role: str | None = None
+
+    # --- Keycloak Admin API (platform_sdk.keycloak_admin, `platform
+    # workspace invite`) --- Separate from catalog_url/workspace/user/role
+    # above: this talks to Keycloak directly, not through catalog-service
+    # (see catalog-service/app/routers/workspaces.py's own docstring on why
+    # membership is Keycloak-group territory, not catalog data). See
+    # keycloak_admin.py's module docstring for the full "why a port-forward
+    # plus a hostname-resolution patch, and not just a URL" design.
+    keycloak_host: str = "keycloak.platform.local"
+    keycloak_realm: str = "platform"
+    keycloak_client_id: str = "platform-cli"
+    # No default, on purpose: KeycloakAdminClient refuses to start rather
+    # than silently doing nothing, with an error naming exactly where to get
+    # this (bootstrap/keycloak-bootstrap-cli-client.sh's printed `export`
+    # line, or its read-back command for a rerun).
+    keycloak_client_secret: str | None = None
+    keycloak_namespace: str = "keycloak"
+    keycloak_service_name: str = "platform-service"
+    keycloak_service_port: int = 8443
+    # Deliberately the same local port the bootstrap script uses — one
+    # number to remember, and the two never run at once in practice (the
+    # bootstrap script is a one-time setup step, this is the ongoing path).
+    keycloak_local_port: int = 18443
+    # Same PATH-under-sudo reasoning as bootstrap/lib/common.sh's own
+    # require_cmd comments — spelled out explicitly rather than trusting
+    # sudo's secure_path to include /usr/local/bin.
+    keycloak_kubectl_cmd: str = "sudo /usr/local/bin/kubectl"

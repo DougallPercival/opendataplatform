@@ -92,15 +92,17 @@ header (every existing test, every curl example above) needed to change. `GET /m
 resolved workspace/user/role back for a caller to self-check.
 
 What this **isn't**: membership storage. Nothing here decides *who's* a workspace's owner/editor/
-viewer — that's still entirely Keycloak-group territory (`src/core/auth/realm-platform.yaml`'s
-`/workspaces/<name>/<role>` groups), and `platform workspace invite` (actually adding someone to
-one of those groups via Keycloak's Admin API) is still not built — that's `platform-cli`'s job.
-This service only decides what a *given, already-resolved* role is allowed to do once it has one.
+viewer — that's entirely Keycloak-group territory (`src/core/auth/realm-platform.yaml`'s
+`/workspaces/<name>/<role>` groups). `platform workspace invite` (`platform-cli`, calling Keycloak's
+Admin API directly via `platform_sdk.keycloak_admin.KeycloakAdminClient`) now does that actual
+membership write — see `platform-sdk`'s README — but it talks to Keycloak, not to this service; this
+service still only decides what a *given, already-resolved* role is allowed to do once it has one.
 
 ## Not yet built
 
 - **Real auth.** See `app/deps.py`'s docstring — X-Role included now, same caveat.
-- **`platform workspace invite`** — actually writing a user into a workspace's Keycloak group.
-  Needs `platform-cli` calling Keycloak's Admin REST API; nothing here does that yet.
-- **platform-sdk / platform-cli** — the actual clients of this API (`@platform.dataset` etc.,
-  `platform-cli publish`). Nothing calls this service yet except its own tests.
+- **`@platform.dataset` etc. self-registration decorators, `platform-cli publish`/`promote`, and
+  platform-sdk/platform-cli coverage for the other four resource types** (pipelines, models,
+  functions, lineage) — `platform-sdk`/`platform-cli` now exist and are real, tested consumers of
+  this service (workspaces + datasets, plus `platform workspace invite` — Keycloak-only, doesn't
+  touch this service at all, see its own README), just not the whole surface yet.

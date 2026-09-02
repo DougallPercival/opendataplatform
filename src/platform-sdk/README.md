@@ -22,6 +22,42 @@ describes (self-registration for *code*, the counterpart to the module self-regi
 §3) also aren't built yet — this pass is the client those decorators will eventually call into, not
 the decorators themselves.
 
+## Workspace invites (2026-09-01): `KeycloakAdminClient`
+
+A second, separate client — `platform_sdk.keycloak_admin.KeycloakAdminClient` — talks to Keycloak's
+own Admin REST API directly, not to catalog-service, to add an existing user to a workspace's
+`owner`/`editor`/`viewer` group (`src/core/auth/realm-platform.yaml`'s `/workspaces/<name>/<role>`
+model). This is `platform workspace invite`'s entire implementation; see `platform_sdk/keycloak_admin.py`'s
+module docstring for the full design, especially *why* it manages its own `kubectl port-forward` and
+reproduces curl's `--resolve` trick in Python (Keycloak's hostname provider — see
+`docs/known-issues.md`'s 2026-08-31 entry — makes a plain port-forward-to-localhost not work the way
+it does for catalog-service).
+
+Requires:
+
+- `PLATFORM_KEYCLOAK_CLIENT_SECRET` set — from `bootstrap/keycloak-bootstrap-cli-client.sh`'s printed
+  `export` line, or its read-back command if you've already run that script once.
+- `kubectl` reachable the same way every other script in this repo expects (`sudo`, `/usr/local/bin/kubectl`).
+- `jq` is NOT needed here (that's the bootstrap script's dependency, for its own bash+curl approach) —
+  this is plain Python/httpx.
+
+Self-heals workspaces that only exist in catalog-service's database so far: `platform workspace
+create` never touches Keycloak (see that service's `app/routers/workspaces.py` docstring), so the
+first `invite` into a workspace besides the seeded `personal` one creates the missing Keycloak group
+path (and maps the matching realm role onto it) automatically rather than requiring a manual
+admin-console step first.
+
+Does **not** create Keycloak users — `realm-platform.yaml` sets `registrationAllowed: false` and
+seeds no users on purpose (see that file's header comment). `invite()` raises a clear
+`KeycloakAdminError` naming this if the username doesn't already exist, rather than a bare 404.
+
+**Confirmed working end-to-end (2026-09-01)** against a real cluster, not just the respx-mocked
+tests below — `KeycloakAdminClient.invite()` (via `platform workspace invite`) successfully joined a
+real Keycloak user to the already-seeded `/workspaces/personal/editor` group: port-forward came up,
+the hostname-resolution patch worked, the client-credentials token exchange worked, the group-by-path
+lookup and the PUT join all did what the code expects. The self-heal path (creating a missing
+workspace/role group from scratch) is still mocked-only — see `platform-cli`'s README.
+
 ## Requirements
 
 **Python 3.12+** (`requires-python` in `pyproject.toml`) — most systems' default `python3` is
@@ -41,6 +77,15 @@ with PlatformClient(workspace="personal", user="alice") as client:
     print(client.list_datasets())
 ```
 
+```python
+from platform_sdk import KeycloakAdminClient, Role
+
+# Needs PLATFORM_KEYCLOAK_CLIENT_SECRET set — see "Workspace invites" above.
+with KeycloakAdminClient() as admin:
+    result = admin.invite("alice", workspace="personal", role=Role.EDITOR)
+    print(result.group_path, result.group_created)
+```
+
 Config resolution (constructor arg > `PLATFORM_*` env var / `.env` > built-in default) is
 `platform_sdk/config.py` — see its docstring, especially for why `PLATFORM_ROLE` defaults to unset
 rather than `"owner"`.
@@ -58,9 +103,19 @@ directly with `respx`. That's a real difference from `catalog-service`'s own tes
 insists on a real Postgres — see that service's `tests/conftest.py`), not an inconsistency: this
 package's job is "does the client send/parse the right thing," not "does the service work."
 
+`tests/test_keycloak_admin.py` does the same for `KeycloakAdminClient` — respx-mocked Admin API
+calls, `KeycloakAdminClient`'s private `_client=` constructor arg bypassing the real
+port-forward/kubectl/hostname-patch plumbing entirely (that plumbing isn't unit-testable without a
+live cluster — see that test file's own docstring, and the real end-to-end confirmation noted in
+`platform-cli`'s README once `workspace invite` has actually been run against a live Keycloak).
+
 ## Error handling
 
-Every non-2xx response raises `platform_sdk.PlatformAPIError` — `.status_code` and `.detail` are
-pulled from the response body (catalog-service's consistent `{"detail": "..."}` shape), so callers
-can branch on `.status_code` (e.g. `403` for a viewer trying to write) without parsing message
-strings.
+Every non-2xx response from `PlatformClient` raises `platform_sdk.PlatformAPIError` — `.status_code`
+and `.detail` are pulled from the response body (catalog-service's consistent `{"detail": "..."}`
+shape), so callers can branch on `.status_code` (e.g. `403` for a viewer trying to write) without
+parsing message strings.
+
+`KeycloakAdminClient` raises `platform_sdk.KeycloakAdminError` instead — a single exception type
+covering everything from "no client secret configured" to "port-forward never came up" to "no such
+Keycloak user" to an unexpected Admin API status, each with a message that says which.

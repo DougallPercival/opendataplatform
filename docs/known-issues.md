@@ -522,6 +522,44 @@ cluster up" prerequisites this repo has never enumerated before now):**
 Each of `catalog-service/README.md`, `platform-sdk/README.md`, and `platform-cli/README.md` now
 states this requirement up front rather than only surfacing it as a pip error.
 
+### `bootstrap/*.sh` losing their executable bit after every pull — this repo is edited from Windows
+
+Hit for real on `homelab-dev` (2026-09-01): `keycloak-bootstrap-cli-client.sh` needed `chmod +x`
+again after simply pulling an updated version of the *same* script — no different than the first
+time it was ever run.
+
+Root cause: this repo's working copy lives on a Windows filesystem (`D:\Projects\OpenDataPlatform`),
+and NTFS has no concept of a Unix executable bit at all. Whatever tool commits changes from that
+side (Claude's own file-delivery pipeline included — it writes raw file bytes, nothing more) has no
+executable bit to set, so every bash script under `bootstrap/` gets checked into git with mode
+`100644` (not executable) unless something has *explicitly* told git otherwise via
+`git update-index --chmod=+x`. On a Linux box, `git pull`/`checkout` applies whatever mode git
+actually has on record for a file every time that file's *content* changes — so a local `chmod +x`
+you did after the first `git pull` doesn't survive the next one that touches the same file; it's not
+sticky the way you'd expect a permission to be.
+
+**One-time fix (do this once, from anywhere with `git` and push access — Windows Git Bash/WSL/
+PowerShell are all fine, this is a plain git plumbing command, not something OS-specific):**
+
+```bash
+git update-index --chmod=+x bootstrap/install.sh bootstrap/join-node.sh \
+  bootstrap/keycloak-bootstrap-cli-client.sh bootstrap/snapshot-setup.sh \
+  bootstrap/teardown.sh bootstrap/verify.sh
+git commit -m "Mark bootstrap scripts executable in git (Windows-side commits don't set the x-bit)"
+git push
+```
+
+This changes what mode git *itself* has recorded for these files, permanently — every future
+`git pull`/clone on any Linux box checks them out already executable, no more manual `chmod +x`
+after every pull. (`bootstrap/lib/common.sh` deliberately isn't in that list — it's `source`d, never
+executed directly, so it was never supposed to be executable.)
+
+Going forward: any *new* script added under `bootstrap/` (or anywhere else meant to be run directly,
+e.g. `./script.sh` rather than `bash script.sh`) needs this same one-time `git update-index
+--chmod=+x` treatment the first time it's committed — there's no way to automate this from Claude's
+side of the file-delivery pipeline (writing file bytes to your working copy has no executable bit to
+set), so it has to happen wherever the actual `git commit`/`push` happens.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a

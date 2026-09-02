@@ -21,12 +21,37 @@ platform dataset update DATASET_ID [--description TEXT] [--visibility ...] [--lo
 platform dataset delete DATASET_ID
 ```
 
-Not built yet: `platform workspace invite` (needs Keycloak Admin API integration — deliberately
-deferred, its own follow-up piece) and commands for the other four catalog-service resource types
-(pipelines, models, functions incl. publish/promote, lineage) — same "add it when platform-cli
-actually needs it" reasoning as everywhere else in this repo. `platform module scaffold/install` from
-ARCHITECTURE.md §3/§7 is unrelated future scope (module lifecycle, not catalog data) — not part of
-this package's current slice either.
+Not built yet: commands for the other four catalog-service resource types (pipelines, models,
+functions incl. publish/promote, lineage) — same "add it when platform-cli actually needs it"
+reasoning as everywhere else in this repo. `platform module scaffold/install` from ARCHITECTURE.md
+§3/§7 is unrelated future scope (module lifecycle, not catalog data) — not part of this package's
+current slice either.
+
+## Workspace invites (2026-09-01)
+
+```text
+platform workspace invite USERNAME [--workspace NAME] [--role owner|editor|viewer]
+```
+
+Adds an EXISTING Keycloak user to a workspace's `owner`/`editor`/`viewer` group. Defaults: `--role
+viewer` (least privilege), `--workspace` from `PLATFORM_WORKSPACE`/`personal` like every other
+command. Doesn't create the user — see `platform_sdk`'s README ("Workspace invites") for why, and for
+the required `PLATFORM_KEYCLOAK_CLIENT_SECRET` setup via `bootstrap/keycloak-bootstrap-cli-client.sh`.
+
+Different from every other command here in one way worth knowing before you run it: it does NOT talk
+to catalog-service or need `PLATFORM_CATALOG_URL` at all — it talks to Keycloak directly, and manages
+its own `kubectl port-forward` to do it (needs `kubectl` + the same `sudo` access every bootstrap
+script in this repo assumes). No separate port-forward to set up first.
+
+**Confirmed working end-to-end (2026-09-01)**, not just respx-mocked: `platform workspace invite
+dougall --role editor` against a real user created by hand in Keycloak's admin console (see
+`bootstrap/keycloak-bootstrap-cli-client.sh` for how `PLATFORM_KEYCLOAK_CLIENT_SECRET` gets set up)
+correctly joined the already-seeded `/workspaces/personal/editor` group and printed `'dougall' added
+to /workspaces/personal/editor (Reused that Keycloak group)`. That proves the "join an existing
+group" path against a live cluster — the "self-heal a missing workspace/role group" path (invite into
+a workspace besides `personal`, which `platform workspace create` never wires up in Keycloak) is
+still only covered by `platform-sdk`'s mocked test suite, not yet exercised live. Worth trying once
+there's a second workspace to invite into.
 
 ## Requirements
 
@@ -44,6 +69,11 @@ source ~/.venvs/platform/bin/activate
 (Ubuntu 22.04 ships 3.10, same problem, different fix — `sudo apt install python3.12` or the
 deadsnakes PPA; macOS — `brew install python@3.12`. See `catalog-service/README.md`'s "Running
 locally" section for the full per-OS list; not repeated here to avoid the two copies drifting.)
+
+**The venv isn't active by default in a new shell** — `source ~/.venvs/platform/bin/activate`
+first, every time, or `platform: command not found` even though it's installed. Easy to forget
+after switching terminals/reconnecting SSH; if `platform` isn't found and you're sure it's
+installed, this is almost always why.
 
 ## Local dev setup
 

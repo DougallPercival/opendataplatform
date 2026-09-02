@@ -53,6 +53,35 @@ class Dataset(BaseModel):
     updated_at: datetime
 
 
+class Role(enum.StrEnum):
+    """Mirrors app.visibility.Role over in catalog-service exactly — same
+    duplication tradeoff Visibility above makes, for the same reason. Also
+    exactly the three realm-role names src/core/auth/realm-platform.yaml
+    seeds (`owner`/`editor`/`viewer`) and the three role-subgroup names
+    under each `/workspaces/<name>/` group — one set of spellings, not
+    three independently-typed ones."""
+
+    OWNER = "owner"
+    EDITOR = "editor"
+    VIEWER = "viewer"
+
+
+class InviteResult(BaseModel):
+    """What `KeycloakAdminClient.invite()` actually did, echoed back so a
+    caller (platform-cli's `workspace invite` command) isn't left guessing
+    whether the Keycloak group it just wrote to already existed or had to
+    be created on the spot — see keycloak_admin.py's module docstring for
+    why the latter can happen at all (workspaces created via `platform
+    workspace create` don't get a matching Keycloak group automatically;
+    this is where that gap gets closed, lazily, on first invite)."""
+
+    username: str
+    workspace: str
+    role: Role
+    group_path: str
+    group_created: bool
+
+
 class Principal(BaseModel):
     """Body of GET /me — see catalog-service's PrincipalRead docstring for
     why this is a "who does the server think I am" snapshot, not a
