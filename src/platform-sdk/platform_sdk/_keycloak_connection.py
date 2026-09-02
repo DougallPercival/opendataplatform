@@ -29,6 +29,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -79,13 +80,21 @@ class _PortForward:
     """
 
     def __init__(
-        self, *, kubectl_cmd: str, namespace: str, service_name: str, service_port: int, local_port: int
+        self,
+        *,
+        kubectl_cmd: str,
+        namespace: str,
+        service_name: str,
+        service_port: int,
+        local_port: int,
+        ready_timeout_seconds: float = 10.0,
     ) -> None:
         self._kubectl_cmd = kubectl_cmd.split()
         self._namespace = namespace
         self._service_name = service_name
         self._service_port = service_port
         self._local_port = local_port
+        self._ready_timeout_seconds = ready_timeout_seconds
         self._process: subprocess.Popen | None = None
         self._ca_cert_path: Path | None = None
 
@@ -144,17 +153,43 @@ class _PortForward:
 
     def _wait_ready(self) -> None:
         # Poll rather than a fixed sleep — same reasoning as the bootstrap
-        # script's own readiness loop.
-        deadline = time.monotonic() + 10
+        # script's own readiness loop. A bare TCP accept succeeding is NOT
+        # enough, and originally this only checked that: `kubectl
+        # port-forward` opens its local listener and starts accepting
+        # connections slightly before the reverse tunnel to the target pod
+        # is actually usable, so a caller that connects in that window gets
+        # accepted and then hit with a TLS-level "connection reset by peer"
+        # on its first real request — indistinguishable, from the caller's
+        # side, from something being genuinely broken. Caught live
+        # (2026-09-02, platform-gateway-auth branch): `platform login`'s
+        # first real run failed exactly this way even though nothing else
+        # was wrong — `platform-service` was healthy, no port collision, the
+        # forward came up fine a moment later. Requiring a full TLS
+        # handshake here (cert verification deliberately OFF — this is a
+        # liveness probe for the tunnel, not an identity check; the real
+        # request right after this returns goes through `_ResolvePatch` and
+        # gets properly verified) proves bytes actually flow end-to-end
+        # through kubectl -> apiserver -> pod, the same guarantee
+        # keycloak-bootstrap-cli-client.sh's own `curl -k` readiness loop
+        # gets, just without shelling out to curl.
+        deadline = time.monotonic() + self._ready_timeout_seconds
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        tls_context.check_hostname = False
+        tls_context.verify_mode = ssl.CERT_NONE
         while time.monotonic() < deadline:
-            with contextlib.suppress(OSError):
-                with socket.create_connection(("127.0.0.1", self._local_port), timeout=0.5):
+            with contextlib.suppress(OSError, ssl.SSLError):
+                with (
+                    socket.create_connection(("127.0.0.1", self._local_port), timeout=0.5) as sock,
+                    tls_context.wrap_socket(sock) as tls_sock,
+                ):
+                    tls_sock.do_handshake()
                     return
             time.sleep(0.3)
         raise KeycloakAdminError(
             f"kubectl port-forward to {self._service_name}:{self._service_port} never came up on "
-            f"127.0.0.1:{self._local_port} within 10s. Is the 'keycloak' namespace's platform-service "
-            "Service up? (sudo kubectl get svc -n keycloak)"
+            f"127.0.0.1:{self._local_port} within {self._ready_timeout_seconds}s (TLS handshake never "
+            "completed). Is the 'keycloak' namespace's platform-service Service up? "
+            "(sudo kubectl get svc -n keycloak)"
         )
 
     def stop(self) -> None:

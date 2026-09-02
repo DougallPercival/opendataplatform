@@ -544,6 +544,38 @@ written in its own config). `platform-ca-secret` also needed Reflector annotatio
 gateway mounts only the `ca.crt` key from that mirrored Secret (never `tls.key`, the CA's private
 key — see `manifests/gateway.yaml`'s own comment for why that distinction matters).
 
+### `platform login`'s first live run hit a real race in `_PortForward`'s readiness check
+
+Found 2026-09-02, platform-gateway-auth branch, during the live end-to-end pass (not a hypothetical
+— `platform login` failed on its very first real invocation against `homelab-dev`). Symptom: a
+`ConnectError: [Errno 104] Connection reset by peer` raised from inside httpx's TLS handshake
+(`start_tls`), not a connect-refused — meaning something accepted the TCP connection on
+`127.0.0.1:18444` and then reset it mid-handshake. Ruled out a stale/colliding port-forward first
+(`ss -ltnp | grep 18444` came back empty — nothing else was listening), which pointed at the real
+cause: `platform_sdk/_keycloak_connection.py`'s `_PortForward._wait_ready()` only confirmed a bare
+TCP `connect()` succeeded before handing control back to the caller. `kubectl port-forward` opens its
+local listener and starts accepting connections slightly *before* its reverse tunnel to the target
+pod is actually usable — so a caller connecting in that narrow window gets its TCP connection
+accepted, then reset once the tunnel underneath still isn't ready, which is exactly indistinguishable
+from "something is genuinely broken" from the caller's side. This is shared code
+(`KeycloakAdminClient` and `KeycloakLoginFlow` both use it, per `_keycloak_connection.py`'s own
+docstring) — `workspace invite`'s earlier live confirmation (2026-09-01) apparently just didn't hit
+the race that day; it's a timing window, not a guarantee.
+
+**Status:** fixed — `_wait_ready()` now requires a full TLS handshake to complete against
+`127.0.0.1:<local_port>` (cert verification deliberately OFF, since this is a liveness probe for the
+tunnel, not an identity check; the real request right after `_wait_ready` returns goes through
+`_ResolvePatch` and gets properly verified against `platform-ca`), the same guarantee
+`keycloak-bootstrap-cli-client.sh`'s and `keycloak-bootstrap-login-client.sh`'s own `curl -k`
+readiness loops already get, just without shelling out to curl. Covered by three new unit tests in
+`tests/test_keycloak_connection.py` — a working TLS listener, a listener that accepts TCP but never
+completes a handshake (the exact regression shape), and nothing listening at all — none of which need
+kubectl or a live cluster, since `_wait_ready()` is pure socket logic underneath the parts of
+`_PortForward` that do (`start()`/`_extract_ca_cert()`, still confirmed-live-only, see
+`test_keycloak_admin.py`'s docstring for why). Not yet re-confirmed live against the real cluster as
+of this entry — `platform login` needs to be re-run after this fix lands; update this entry once that
+run is confirmed clean.
+
 ### GHCR packages default to private on first publish — one manual step after `ci.yml`'s first push
 
 Added 2026-09-01, alongside `.github/workflows/ci.yml` and `manifests/catalog-service.yaml`.
