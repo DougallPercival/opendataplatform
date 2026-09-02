@@ -14,16 +14,21 @@ from datetime import UTC, datetime
 import pytest
 from platform_sdk import (
     Dataset,
+    DeviceAuthorization,
     InviteResult,
     KeycloakAdminError,
+    NotAuthenticatedError,
     PlatformAPIError,
+    PlatformLoginError,
     Principal,
     Role,
+    TokenSet,
     Visibility,
     Workspace,
 )
 from typer.testing import CliRunner
 
+import platform_cli.login as login_module
 import platform_cli.main as main_module
 import platform_cli.workspace as workspace_module
 from platform_cli.main import app
@@ -243,3 +248,126 @@ def test_workspace_invite_keycloak_error_prints_and_exits_1(fake_keycloak):
     result = runner.invoke(app, ["workspace", "invite", "ghost"])
     assert result.exit_code == 1
     assert "ghost" in result.output
+
+
+# ---- auth: gateway_url/workspace flag passthrough, removed --user/--role,
+# NotAuthenticatedError surfacing, `platform login` -----------------------
+
+
+def test_gateway_url_and_workspace_flags_passed_to_platform_client(monkeypatch):
+    captured: dict = {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def close(self):
+            pass
+
+        def me(self):
+            return Principal(workspace_id=uuid.uuid4(), workspace_name="x", user_id="y", role="owner")
+
+    monkeypatch.setattr(main_module, "PlatformClient", _Client)
+    result = runner.invoke(app, ["--gateway-url", "http://gateway.test", "--workspace", "nfl-betting", "me"])
+    assert result.exit_code == 0, result.output
+    assert captured == {"gateway_url": "http://gateway.test", "workspace": "nfl-betting"}
+
+
+@pytest.mark.parametrize("removed_flag", ["--user", "--role", "--catalog-url"])
+def test_removed_flags_are_rejected_not_silently_ignored(fake_client, removed_flag):
+    # --user/--role/--catalog-url no longer exist (see main.py's module
+    # docstring) — confirms they fail loudly (Typer's "no such option")
+    # rather than being silently accepted and doing nothing.
+    result = runner.invoke(app, [removed_flag, "whatever", "me"])
+    assert result.exit_code != 0
+    assert "no such option" in result.output.lower()
+
+
+def test_not_authenticated_error_prints_fix_and_exits_1(fake_client):
+    fake_client.queue("me", NotAuthenticatedError("Not logged in — run `platform login` first."))
+    result = runner.invoke(app, ["me"])
+    assert result.exit_code == 1
+    assert "platform login" in result.output
+
+
+class FakeLoginFlow:
+    """Stands in for KeycloakLoginFlow — no real port-forward/kubectl/HTTP.
+    Same fake-at-the-boundary split as FakeClient/FakeKeycloakAdminClient
+    above: platform-sdk's own respx-mocked test_keycloak_login.py proves the
+    device-flow HTTP calls are right; this proves `platform login` wires
+    its output/error-handling around *a* flow correctly."""
+
+    def __init__(self, device_auth: DeviceAuthorization, *, token_set=None, poll_exception=None):
+        self._device_auth = device_auth
+        self._token_set = token_set
+        self._poll_exception = poll_exception
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+    def start_device_authorization(self) -> DeviceAuthorization:
+        return self._device_auth
+
+    def poll_for_token(self, device_auth: DeviceAuthorization):
+        if self._poll_exception is not None:
+            raise self._poll_exception
+        return self._token_set
+
+
+def _device_auth(verification_uri_complete: str | None = "https://keycloak.test/device?user_code=ABCD-EFGH"):
+    return DeviceAuthorization(
+        device_code="dc-1",
+        user_code="ABCD-EFGH",
+        verification_uri="https://keycloak.test/device",
+        verification_uri_complete=verification_uri_complete,
+        expires_in=600,
+        interval=5,
+    )
+
+
+def test_login_success_prints_verification_url_and_saves_credentials(monkeypatch):
+    token_set = TokenSet(
+        access_token="at-1", refresh_token="rt-1", expires_at=datetime.now(UTC), preferred_username="alice"
+    )
+    fake_flow = FakeLoginFlow(_device_auth(), token_set=token_set)
+    monkeypatch.setattr(login_module, "KeycloakLoginFlow", lambda **kwargs: fake_flow)
+    saved: list[TokenSet] = []
+    monkeypatch.setattr(login_module, "save_credentials", saved.append)
+
+    result = runner.invoke(app, ["login"])
+
+    assert result.exit_code == 0, result.output
+    assert "https://keycloak.test/device?user_code=ABCD-EFGH" in result.output
+    assert "Logged in as alice" in result.output
+    assert saved == [token_set]
+
+
+def test_login_falls_back_to_uri_plus_code_when_complete_form_absent(monkeypatch):
+    token_set = TokenSet(
+        access_token="at-1", refresh_token="rt-1", expires_at=datetime.now(UTC), preferred_username=None
+    )
+    fake_flow = FakeLoginFlow(_device_auth(verification_uri_complete=None), token_set=token_set)
+    monkeypatch.setattr(login_module, "KeycloakLoginFlow", lambda **kwargs: fake_flow)
+    monkeypatch.setattr(login_module, "save_credentials", lambda _ts: None)
+
+    result = runner.invoke(app, ["login"])
+
+    assert result.exit_code == 0, result.output
+    assert "https://keycloak.test/device" in result.output
+    assert "ABCD-EFGH" in result.output
+    assert "Logged in as you" in result.output  # no preferred_username -> generic fallback
+
+
+def test_login_failure_prints_and_exits_1(monkeypatch):
+    fake_flow = FakeLoginFlow(
+        _device_auth(), poll_exception=PlatformLoginError("Login was denied in the browser.")
+    )
+    monkeypatch.setattr(login_module, "KeycloakLoginFlow", lambda **kwargs: fake_flow)
+
+    result = runner.invoke(app, ["login"])
+
+    assert result.exit_code == 1
+    assert "denied" in result.output

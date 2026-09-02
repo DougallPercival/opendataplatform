@@ -2,13 +2,17 @@
 # (test, then build+push its image) and, added the same day once they
 # existed, platform-sdk + platform-cli (lint+test only — they're a library
 # and a CLI tool, not something that gets built into a container image).
-# The full path-filtered matrix ARCHITECTURE.md §10 and CONTRIBUTING.md
-# describe (markdownlint, yamllint, shellcheck, hadolint, helm lint) is
-# still aspirational — add those jobs as the pieces they'd actually check
-# show up, same "don't build what the current phase doesn't need yet"
-# pattern the rest of this repo follows. This file's own path filter below
-# is deliberately narrow for the same reason: it shouldn't fire on changes
-# that have nothing to do with any of these three packages.
+# `gateway` (platform-gateway-auth branch, 2026-09-02) joined as a fourth
+# path/package — build+push like catalog-service (it's a container image
+# too), wired the same way that one was: a paths-filter output, a
+# test-<pkg> job, a build-and-push-<pkg> job. The full path-filtered matrix
+# ARCHITECTURE.md §10 and CONTRIBUTING.md describe (markdownlint, yamllint,
+# shellcheck, hadolint, helm lint) is still aspirational — add those jobs as
+# the pieces they'd actually check show up, same "don't build what the
+# current phase doesn't need yet" pattern the rest of this repo follows.
+# This file's own path filter below is deliberately narrow for the same
+# reason: it shouldn't fire on changes that have nothing to do with any of
+# these four packages.
 name: CI
 
 on:
@@ -16,6 +20,7 @@ on:
     branches: [dev, test, main]
     paths:
       - "src/core/catalog-service/**"
+      - "src/core/gateway/**"
       - "src/platform-sdk/**"
       - "src/platform-cli/**"
       - ".github/workflows/ci.yml"
@@ -23,6 +28,7 @@ on:
     branches: [dev, test, main]
     paths:
       - "src/core/catalog-service/**"
+      - "src/core/gateway/**"
       - "src/platform-sdk/**"
       - "src/platform-cli/**"
       - ".github/workflows/ci.yml"
@@ -32,15 +38,16 @@ permissions:
 
 jobs:
   # Added alongside platform-sdk/platform-cli's own job below: with the top-
-  # level `paths:` filters above now matching THREE independent packages,
-  # any change to any one of them fires the whole workflow — which, without
-  # this gate, meant a platform-sdk-only change would also spin up
-  # catalog-service's Postgres service container and run a full Docker
-  # build (and, on a push to dev/test/main, actually PUSH a redundant image
-  # to GHCR under an unchanged tag) despite catalog-service not having
-  # changed at all. This job computes which package(s) actually changed
-  # once, so `test`/`build-and-push` and `test-platform-packages` below can
-  # each skip themselves when their own package didn't change — real cost/
+  # level `paths:` filters above now matching FOUR independent packages, any
+  # change to any one of them fires the whole workflow — which, without this
+  # gate, meant a platform-sdk-only change would also spin up
+  # catalog-service's Postgres service container and run full Docker builds
+  # for BOTH catalog-service and gateway (and, on a push to dev/test/main,
+  # actually PUSH redundant images to GHCR under unchanged tags) despite
+  # neither having changed at all. This job computes which package(s)
+  # actually changed once, so `test`/`build-and-push`, `test-gateway`/
+  # `build-and-push-gateway`, and `test-platform-packages` below can each
+  # skip themselves when their own package didn't change — real cost/
   # correctness fix, not just tidiness (an unnecessary GHCR push isn't
   # dangerous, but it's not nothing either).
   changes:
@@ -48,6 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       catalog_service: ${{ steps.filter.outputs.catalog_service }}
+      gateway: ${{ steps.filter.outputs.gateway }}
       platform_packages: ${{ steps.filter.outputs.platform_packages }}
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +65,9 @@ jobs:
           filters: |
             catalog_service:
               - 'src/core/catalog-service/**'
+              - '.github/workflows/ci.yml'
+            gateway:
+              - 'src/core/gateway/**'
               - '.github/workflows/ci.yml'
             platform_packages:
               - 'src/platform-sdk/**'
@@ -179,6 +190,73 @@ jobs:
           # itself — see docs/known-issues.md's "GHCR package defaults to
           # private on first publish" entry for the one manual step still
           # needed after this workflow's first successful run.
+          labels: |
+            org.opencontainers.image.source=https://github.com/DougallPercival/opendataplatform
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test-gateway:
+    name: Test gateway
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/core/gateway
+    # No `services: postgres` here, same reasoning as test-platform-packages
+    # below — gateway is stateless (see its own README: no live
+    # Keycloak/catalog-service needed either, everything's respx-mocked at
+    # the HTTP transport level, JWTs are signed with a throwaway in-test RSA
+    # keypair). A Postgres service container here would be pure dead weight.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: python -m pytest -v
+
+  build-and-push-gateway:
+    name: Build & push gateway image
+    needs: [changes, test-gateway]
+    # Same "written out explicitly, even though it's redundant with the
+    # skipped-dependency cascade" reasoning as build-and-push's own
+    # identical comment above.
+    if: needs.changes.outputs.gateway == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # Same hardcoded-lowercase reasoning as build-and-push's IMAGE_NAME
+      # above — see that job's own comment.
+      IMAGE_NAME: ghcr.io/dougallpercival/gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: src/core/gateway
+          push: ${{ github.event_name == 'push' }}
+          # Identical ternary to build-and-push's own `tags:` above, copied
+          # verbatim rather than re-derived — that job's own long comment
+          # explains exactly why a bare `github.ref_name` breaks on a
+          # pull_request event ("<pr>/merge" isn't a valid Docker tag
+          # component) and isn't repeated here to avoid the two copies
+          # drifting apart; this is the same bug, already fixed once, reused
+          # rather than risking reintroducing it.
+          tags: >-
+            ${{ github.event_name == 'push'
+            && format('{0}:{1}', env.IMAGE_NAME, github.ref_name)
+            || format('{0}:pr-{1}', env.IMAGE_NAME, github.event.pull_request.number) }}
           labels: |
             org.opencontainers.image.source=https://github.com/DougallPercival/opendataplatform
           cache-from: type=gha

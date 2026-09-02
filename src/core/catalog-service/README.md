@@ -18,9 +18,11 @@ thing. See "Not yet built" below for what's deliberately left for the next steps
   it's written out per-table rather than through a mixin.
 - `app/visibility.py` — the ONE place the read/write rule lives (`private`/`workspace`/`public`,
   and the "public means readable, not writable" asymmetry from §4). Every router goes through this.
-- `app/deps.py` — **placeholder auth**: reads `X-Workspace`/`X-User` headers, no JWT verification.
-  Real auth is `platform-gateway`'s job once it proxies here (see its own README) — read that
-  module's docstring before relying on this past a cluster boundary.
+- `app/deps.py` — reads `X-Workspace`/`X-User`/`X-Role` headers; as of the platform-gateway-auth
+  branch (2026-09-02), that's the correct permanent shape, not a placeholder — `platform-gateway`
+  verifies every caller's Keycloak JWT and is the only thing that ever sets these headers on a
+  request that reaches this service (see its own README, and this module's docstring for the full
+  trust-boundary writeup, including the one gap that's still open at the network layer).
 - `app/routers/` — CRUD for each entity type, plus `functions.py`'s `/publish` and `/promote`
   (the `platform-cli function promote --public` §4 calls out by name) and `lineage.py`.
 - `migrations/` — Alembic, hand-written initial migration (`0001_initial_schema.py`, no live DB in
@@ -78,18 +80,25 @@ public). See `docs/known-issues.md`.
 
 `../argocd/manifests/catalog-service.yaml` (Argo CD Application `catalog-service`, wave 3) runs a
 PreSync `alembic upgrade head` Job against the `catalog` database, then a 1-replica Deployment +
-ClusterIP Service — deliberately no Ingress, see `docs/known-issues.md`'s auth entry below.
+ClusterIP Service — deliberately no Ingress. `platform-gateway` (wave 4, `../gateway/`) is the
+intended way in from outside this service's own namespace; see `docs/known-issues.md`'s auth entry
+below for what's still open even with gateway in front (network-layer isolation, not application-layer
+trust).
 
 ## Roles (2026-09-01)
 
 `app/visibility.py` now enforces owner/editor/viewer (ARCHITECTURE.md §4's table) on every write:
 a viewer can read anything visibility already lets them read, but `can_write`/`can_create` block
 them from creating, updating, deleting, publishing, or promoting — even something they created
-themselves. Role arrives the same placeholder way workspace/user identity already do — a new
-`X-Role` header, trusted with zero verification until `platform-gateway` exists (see
-`app/deps.py`'s docstring) — and defaults to `owner` when absent, so nothing that predates this
-header (every existing test, every curl example above) needed to change. `GET /me` reflects the
-resolved workspace/user/role back for a caller to self-check.
+themselves. Role arrives via the same `X-Role` header workspace/user identity already do — as of
+the platform-gateway-auth branch (2026-09-02), gateway-derived from the caller's verified Keycloak
+token's `groups` claim, never client-declared (see `app/deps.py`'s docstring) — and still defaults
+to `owner` when absent, so nothing that predates this header (every existing test, every curl
+example above) needed to change. That default matters more now than it used to: gateway must
+always send an explicit `X-Role` for every request it forwards, never omit it — see `DEFAULT_ROLE`'s
+own comment in `app/deps.py` for why an omitted `X-Role` would be a real privilege-escalation path,
+not a hypothetical one. `GET /me` reflects the resolved workspace/user/role back for a caller to
+self-check.
 
 What this **isn't**: membership storage. Nothing here decides *who's* a workspace's owner/editor/
 viewer — that's entirely Keycloak-group territory (`src/core/auth/realm-platform.yaml`'s
@@ -100,7 +109,10 @@ service still only decides what a *given, already-resolved* role is allowed to d
 
 ## Not yet built
 
-- **Real auth.** See `app/deps.py`'s docstring — X-Role included now, same caveat.
+- **Network-layer isolation.** `platform-gateway` (2026-09-02) closed the *application-layer* auth
+  gap — see `app/deps.py`'s docstring — but nothing yet stops another in-cluster pod from reaching
+  this service's `ClusterIP` directly, bypassing gateway. A `NetworkPolicy` restricting ingress to
+  gateway's namespace only would close it; tracked in `docs/known-issues.md`, not built this pass.
 - **`@platform.dataset` etc. self-registration decorators, `platform-cli publish`/`promote`, and
   platform-sdk/platform-cli coverage for the other four resource types** (pipelines, models,
   functions, lineage) — `platform-sdk`/`platform-cli` now exist and are real, tested consumers of

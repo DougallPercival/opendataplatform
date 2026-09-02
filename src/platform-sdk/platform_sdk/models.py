@@ -82,6 +82,35 @@ class InviteResult(BaseModel):
     group_created: bool
 
 
+class TokenSet(BaseModel):
+    """What `platform login`'s device-flow poll loop (or a later silent
+    refresh) got back from Keycloak's token endpoint, plus one derived field
+    — `expires_at` — computed once, right when the tokens are minted, so
+    every later reader (PlatformClient's near-expiry check, `platform
+    login`'s own "logged in as X" print) works off a fixed timestamp instead
+    of re-deriving "how long is left" from a raw `expires_in` seconds-count
+    that would drift depending on how long this struct sat in
+    credentials.json before being read back.
+
+    `refresh_token` is typed optional only for the type checker's sake —
+    Keycloak's response for this client's grant type always includes one in
+    practice; `keycloak_login.py`'s own docstring covers why a `None` here
+    would mean something upstream actually went wrong, not a routine case.
+
+    `preferred_username` comes from the ID token's payload (see
+    `keycloak_login.py`'s `_extract_preferred_username` for why reading it
+    unverified is safe here) and exists purely so `platform login` can print
+    who you're now logged in as without a second round-trip — nothing
+    authorization-relevant ever reads this field; that all happens
+    server-side, off the verified access_token, in gateway.
+    """
+
+    access_token: str
+    refresh_token: str | None
+    expires_at: datetime
+    preferred_username: str | None
+
+
 class Principal(BaseModel):
     """Body of GET /me — see catalog-service's PrincipalRead docstring for
     why this is a "who does the server think I am" snapshot, not a

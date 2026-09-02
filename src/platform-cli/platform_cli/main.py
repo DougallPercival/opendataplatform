@@ -10,6 +10,23 @@ var > built-in default; see platform_sdk/config.py and client.py) do the
 actual resolution. This file doesn't re-implement env var reading itself,
 so there's exactly one definition of "what does unset mean," not two that
 could disagree.
+
+`--user`/`--role` REMOVED (2026-09-02, platform-gateway-auth branch) — this
+is the breaking-change part of that branch, not an oversight. Identity and
+role are no longer anything a caller declares from the client side; gateway
+derives both from the caller's verified Keycloak token (see
+platform_sdk/client.py's module docstring). There's no flag that could
+still do anything useful here, so removing them (rather than leaving them
+silently ignored) is the honest option — `platform --user alice ...` now
+fails with Typer's own "no such option" instead of quietly doing nothing.
+`--catalog-url` similarly RENAMED to `--gateway-url` — PlatformClient talks
+to platform-gateway now, not catalog-service directly (see config.py's
+gateway_url docstring for the same rename applied to its env var).
+
+Constructing a PlatformClient here does NOT require being logged in — the
+credentials check is lazy, on the first actual request a command makes (see
+client.py's `_ensure_token`) — so `platform login` itself, and `--help`,
+both work with no credentials on disk yet.
 """
 from __future__ import annotations
 
@@ -18,36 +35,31 @@ from platform_sdk import PlatformClient
 
 from platform_cli.dataset import app as dataset_app
 from platform_cli.errors import handle_api_errors
+from platform_cli.login import login as login_command
 from platform_cli.workspace import app as workspace_app
 
 app = typer.Typer(
     name="platform",
-    help="ARCHITECTURE.md §4/§10's platform CLI — talks to catalog-service via platform-sdk.",
+    help="ARCHITECTURE.md §4/§10's platform CLI — talks to platform-gateway (which proxies to "
+    "catalog-service) via platform-sdk.",
     no_args_is_help=True,
 )
 app.add_typer(workspace_app, name="workspace", help="Manage workspaces.")
 app.add_typer(dataset_app, name="dataset", help="Manage datasets.")
+app.command("login", help="Log in via your browser (OAuth device flow).")(login_command)
 
 
 @app.callback()
 def main(
     ctx: typer.Context,
-    catalog_url: str | None = typer.Option(
-        None, "--catalog-url", help="Overrides PLATFORM_CATALOG_URL / the built-in default."
+    gateway_url: str | None = typer.Option(
+        None, "--gateway-url", help="Overrides PLATFORM_GATEWAY_URL / the built-in default."
     ),
     workspace: str | None = typer.Option(
         None, "--workspace", "-w", help="Overrides PLATFORM_WORKSPACE / the built-in default."
     ),
-    user: str | None = typer.Option(
-        None, "--user", "-u", help="Overrides PLATFORM_USER / the current OS user."
-    ),
-    role: str | None = typer.Option(
-        None,
-        "--role",
-        help="Overrides PLATFORM_ROLE. Leave unset to run as catalog-service's own default (owner).",
-    ),
 ) -> None:
-    client = PlatformClient(catalog_url=catalog_url, workspace=workspace, user=user, role=role)
+    client = PlatformClient(gateway_url=gateway_url, workspace=workspace)
     # Click's context teardown hook, not a try/finally wrapped around every
     # single command — one registration here covers all of them, and fires
     # whether the command succeeded, failed, or raised typer.Exit.
@@ -58,7 +70,9 @@ def main(
 @app.command()
 @handle_api_errors
 def me(ctx: typer.Context) -> None:
-    """Who does catalog-service think I am, given my current headers."""
+    """Who does gateway think I am, based on my verified token — not
+    catalog-service directly anymore (see platform_sdk/client.py's module
+    docstring)."""
     client: PlatformClient = ctx.obj
     principal = client.me()
     typer.echo(f"workspace : {principal.workspace_name} ({principal.workspace_id})")
