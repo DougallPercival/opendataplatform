@@ -87,6 +87,19 @@ async def test_verify_token_rejects_missing_kid(sign_token, jwks):
     assert exc_info.value.status_code == 401
 
 
+async def test_verify_token_accepts_a_token_carrying_an_aud_claim(sign_token, jwks):
+    # Regression test for a real bug (found live, 2026-09-02, not caught by
+    # any test before this): a token with an `aud` claim — which every real
+    # Keycloak-issued token has — used to fail with InvalidAudienceError
+    # because verify_token() never told PyJWT what audience to expect. Every
+    # other test in this file already exercises this path implicitly now
+    # that conftest.py's sign_token defaults to including `aud`, but this
+    # one pins it explicitly so the specific failure mode has a named test,
+    # not just incidental coverage.
+    claims = await verify_token(f"Bearer {sign_token({'aud': 'some-client-id'})}", jwks)
+    assert claims["aud"] == "some-client-id"
+
+
 async def test_verify_token_rejects_signature_from_a_different_key(sign_token, jwks):
     # Same kid as the real keypair, but actually SIGNED with a different
     # key — this is what proves signature verification is genuinely
