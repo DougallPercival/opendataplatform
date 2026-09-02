@@ -674,10 +674,49 @@ the Ingress's standard port and omits it from generated URLs entirely (same as a
 silently wrong, not just unnecessary — worth remembering to actually remove them, not just leave them
 as harmless-looking leftovers, when that Ingress work lands.
 
-**Not yet re-confirmed live as of this entry** — `homelab-dev` needs `git pull` to pick up both
-manifest changes, Argo CD needs to sync `keycloak-instance` and `gateway` again, and `platform login`
-needs a fresh run (the credentials saved before this fix carry the old, mismatched `iss` and won't
-retroactively start working — a new login is required, not just retrying `platform me`).
+**Confirmed live** — after `homelab-dev` pulled both manifest changes and Argo CD resynced
+`keycloak-instance`/`gateway`, a fresh `platform login` succeeded with no "Invalid issuer" error. The
+very next call (`platform me`) immediately hit a different, previously-hidden failure — see the next
+entry.
+
+### `platform me`'s first real call hit a fourth issue: PyJWT rejected a real token's `aud` claim
+
+Found 2026-09-02, platform-gateway-auth branch, same live pass, immediately after the issuer fix
+above was confirmed working — `platform me` failed with `gateway error (401): Token failed
+verification: Invalid audience`. Fourth distinct live-testing finding in this one session, and unlike
+the first three, NOT related to Keycloak's hostname/port behavior at all — this one is a gap between
+what the test suite's synthetic JWTs looked like and what a real Keycloak-issued token actually
+contains.
+
+`gateway/app/auth.py`'s `verify_token()` calls `jwt.decode(...)` without an `audience=` argument.
+PyJWT's default `options` has `verify_aud: True` — if the token being verified carries an `aud` claim
+but the caller never says what audience to expect, PyJWT raises `InvalidAudienceError` rather than
+silently skipping the check, on the reasoning that an unchecked-but-present `aud` claim is probably a
+caller mistake. Every real Keycloak-issued token carries an `aud` claim (`"account"` by Keycloak's own
+default, unless a client's scopes/mappers say otherwise) — but `tests/conftest.py`'s `sign_token`
+fixture never included one, so every existing test signed a token shape real Keycloak never actually
+produces, and this path went completely untested until a real login exercised it.
+
+**Status:** fixed — `verify_token()` now passes `"verify_aud": False` in `jwt.decode()`'s `options`,
+with a comment explaining why explicitly (not simply "pass the right audience instead"): gateway isn't
+itself a registered Keycloak client with a principled expected audience of its own —
+`platform-cli-login` mints tokens for whatever Keycloak's default happens to be, and hardcoding a
+check against that default (`"account"`) would tie this code to an internal Keycloak implementation
+detail that could silently change if this realm's client scopes/mappers are ever reconfigured, without
+strengthening the actual trust boundary at all. That boundary is signature + issuer + expiry + the
+`groups` claim's workspace-membership check in `derive_headers()` — none of which depend on `aud`.
+`tests/conftest.py`'s `sign_token` now includes a realistic `"aud": "account"` claim by default (so
+every existing test exercises this path going forward, not just a new one), plus a new
+`test_verify_token_accepts_a_token_carrying_an_aud_claim` regression test in `test_auth.py` pinning
+the fix explicitly. 31/31 gateway tests pass, ruff clean.
+
+**The general lesson, worth stating plainly rather than leaving implicit:** four distinct live-testing
+failures in one session, and three of the four (this one included) trace back to the test suite's
+synthetic tokens being more lenient than a real Keycloak-issued one — missing `aud` here, and the
+first three all being downstream of `hostname-port` behavior no unit test could exercise without a
+real cluster. Worth remembering next time a new claim or Keycloak-specific behavior is added anywhere
+in this codebase: match what real Keycloak actually produces in test fixtures, not just what's
+convenient to construct, or the gap just moves to the next thing that touches it.
 
 ### GHCR packages default to private on first publish — one manual step after `ci.yml`'s first push
 

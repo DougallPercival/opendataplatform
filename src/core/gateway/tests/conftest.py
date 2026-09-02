@@ -60,6 +60,16 @@ def sign_token(rsa_keypair: RSAPrivateKey):
             "exp": int(time.time()) + expires_in,
             "preferred_username": "alice",
             "groups": ["/workspaces/personal/editor"],
+            # A real Keycloak token always carries this (its own default is
+            # "account" unless a client's scopes/mappers say otherwise) —
+            # included here by default so every test signs a realistic
+            # token shape, not one gateway happens to accept only because
+            # it's missing a claim real tokens actually have. Found live,
+            # 2026-09-02: this fixture's tokens never carried `aud` before,
+            # so `verify_token`'s missing `verify_aud: False` (app/auth.py)
+            # went untested until a real login hit it — see that file's own
+            # comment on the fix.
+            "aud": "account",
         }
         if claims:
             payload.update(claims)

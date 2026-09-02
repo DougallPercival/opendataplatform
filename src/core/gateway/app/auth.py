@@ -96,7 +96,30 @@ async def verify_token(authorization: str | None, jwks: JWKSCache) -> dict:
             key=public_key,
             algorithms=["RS256"],
             issuer=settings.expected_issuer,
-            options={"require": ["exp", "iss", "sub"]},
+            # verify_aud deliberately OFF, not an oversight: found live,
+            # 2026-09-02 — a real Keycloak-issued token always carries an
+            # `aud` claim (Keycloak's own default, "account", unless a
+            # client's scopes/mappers say otherwise), and PyJWT's default
+            # `verify_aud: True` raises InvalidAudienceError whenever a
+            # token HAS an `aud` claim but no `audience=` was given to check
+            # it against — every `platform login` request was failing here
+            # with "Invalid audience" until this was set explicitly.
+            # Gateway has no principled value to pass instead: it isn't
+            # itself a registered Keycloak client with its own expected
+            # audience — `platform-cli-login` mints tokens for whatever
+            # Keycloak's default happens to be, and pinning gateway's check
+            # to that default (e.g. hardcoding "account") would bind this
+            # code to an internal Keycloak implementation detail that could
+            # silently change if this realm's client scopes/mappers ever
+            # do, without strengthening the actual trust boundary at all —
+            # that boundary is signature + issuer + exp + the `groups`
+            # claim's workspace-membership check in derive_headers() below,
+            # none of which depend on `aud`. Not tested against a synthetic
+            # JWT lacking `aud` before this — conftest.py's sign_token
+            # fixture now includes one by default specifically so this
+            # class of "test fixture more lenient than a real token" gap
+            # doesn't recur for some other claim later.
+            options={"require": ["exp", "iss", "sub"], "verify_aud": False},
         )
     except jwt.ExpiredSignatureError as exc:
         raise AuthError(401, "Token has expired — run `platform login` again.") from exc
