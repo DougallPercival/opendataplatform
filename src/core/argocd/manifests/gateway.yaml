@@ -54,7 +54,18 @@ spec:
             - name: GATEWAY_KEYCLOAK_INTERNAL_URL
               value: https://platform-service.keycloak.svc.cluster.local:8443
             - name: GATEWAY_KEYCLOAK_PUBLIC_URL
-              value: https://keycloak.platform.local
+              # :18444 is an interim, homelab-only value, not the real
+              # production shape — see keycloak-instance.yaml's
+              # additionalOptions/hostname-port comment for the full story
+              # (found live, 2026-09-02: without a pinned port, every
+              # platform-login-issued token's `iss` claim carried whatever
+              # ephemeral port the CLI's own port-forward happened to use,
+              # which could never match a fixed value here — every request
+              # 401'd with "Invalid issuer"). Must stay in sync with
+              # whatever port keycloak-instance.yaml's hostname-port option
+              # pins. Drop the port entirely once this cluster has a real
+              # Ingress in front of Keycloak.
+              value: https://keycloak.platform.local:18444
             - name: GATEWAY_KEYCLOAK_REALM
               value: platform
             - name: GATEWAY_KEYCLOAK_CA_PATH
