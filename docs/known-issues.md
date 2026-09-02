@@ -503,6 +503,20 @@ problem — the client ends up correctly configured either way. Worth noting her
 cluster's 26.7.2 Operator actually took, the first time this script runs for real, so a future reader
 doesn't have to rediscover it.
 
+**Confirmed 2026-09-02, first live run against `homelab-dev`'s real Keycloak 26.7.2 Operator:** it
+*does* still reject the top-level field —
+`{"error":"Invalid json representation for ClientRepresentation. Unrecognized field
+\"oauth2DeviceAuthorizationGrantEnabled\" at line 9 column 48."}` — same as the v21.0.2 report this
+entry was written against. The script's fallback handled it exactly as designed: retried with the
+attributes-only body, created `platform-cli-login` successfully, and printed which path it took. So
+on this cluster, expect to see the fallback warning every time this script creates the client fresh
+(idempotent re-runs after that just report the client already exists, no warning). One unrelated,
+also-expected bit of output from the same run: two `curl: (7) Connection refused` lines appeared
+right after the port-forward started — that's the script's own readiness-poll loop (up to 20 tries,
+0.5s apart, stderr not suppressed) finding its feet before `kubectl port-forward` finished
+establishing, not a failure; the run went on to succeed. Noting it here since the two look alarming
+in the raw log without this context.
+
 ### `keycloak-tls`'s Certificate needed the in-cluster Service DNS name added as a SAN
 
 Added 2026-09-02, platform-gateway-auth branch. `platform-gateway` connects directly to Keycloak's
