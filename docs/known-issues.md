@@ -710,6 +710,26 @@ every existing test exercises this path going forward, not just a new one), plus
 `test_verify_token_accepts_a_token_carrying_an_aud_claim` regression test in `test_auth.py` pinning
 the fix explicitly. 31/31 gateway tests pass, ruff clean.
 
+**Confirmed live, 2026-09-02** — once the fix actually reached `dev` (a real gap in its own right: the
+commit initially only existed on `feature/platform-gateway-auth`, never merged forward, so neither CI
+nor Argo CD — both gated on `dev` — ever saw it; see the "four self-referencing apps" entry above for
+the same class of gotcha applying to CI/image builds, not just Argo CD Applications) and
+`build-and-push-gateway` rebuilt `ghcr.io/dougallpercival/gateway:dev`, `platform me` returned real
+data end to end: `workspace: personal`, `user: dougall`, `role: editor` — matching the group
+membership `platform workspace invite --role editor` set up earlier. This is the first fully clean
+`platform login` → `platform me` round-trip through the real cluster.
+
+**The plan's full live verification is now complete.** The last remaining item — a viewer-role user
+attempting a write gets a real 403 — was confirmed the same day: a second Keycloak user (`testviewer`)
+was created by hand, added to `/workspaces/personal/viewer` via `platform workspace invite testviewer
+--role viewer`, logged in via `platform login`, and `platform dataset create ...` correctly rejected
+with a 403 — role came entirely from real Keycloak group membership, nothing the client sent. That's
+the actual security property this branch exists to prove, and it holds. Every item in the plan's
+Verification section is now checked off against the real cluster, not just the test suite: the
+bootstrap script's live device-grant fallback, the Certificate SAN/Reflector fix, gateway
+Synced/Healthy with a working `/healthz`, `platform login`'s full device flow, `platform me`/`platform
+workspace list` through gateway, and this final role-enforcement check.
+
 **The general lesson, worth stating plainly rather than leaving implicit:** four distinct live-testing
 failures in one session, and three of the four (this one included) trace back to the test suite's
 synthetic tokens being more lenient than a real Keycloak-issued one — missing `aud` here, and the
