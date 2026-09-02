@@ -572,9 +572,60 @@ readiness loops already get, just without shelling out to curl. Covered by three
 completes a handshake (the exact regression shape), and nothing listening at all — none of which need
 kubectl or a live cluster, since `_wait_ready()` is pure socket logic underneath the parts of
 `_PortForward` that do (`start()`/`_extract_ca_cert()`, still confirmed-live-only, see
-`test_keycloak_admin.py`'s docstring for why). Not yet re-confirmed live against the real cluster as
-of this entry — `platform login` needs to be re-run after this fix lands; update this entry once that
-run is confirmed clean.
+`test_keycloak_admin.py`'s docstring for why). Re-running `platform login` after this fix landed got
+past this specific failure — see the next entry for what showed up right after.
+
+### `platform login`'s printed verification URL was only ever reachable from the machine running it
+
+Found 2026-09-02, platform-gateway-auth branch, same live end-to-end pass, immediately after the
+`_wait_ready` race above was fixed. `platform login` ran to completion and printed a verification
+URL — `https://keycloak.platform.local:18444/realms/platform/device?user_code=...` — but opening it
+in a browser on a *different* machine (the Windows box this repo's working copy lives on) than the
+one running `platform login` (`homelab-dev`) failed to resolve at all.
+
+Two things compound here, both worth understanding on their own:
+
+1. **The port is `platform-cli-login`'s own ephemeral local port-forward port (`18444`), not
+   Keycloak's real one.** Keycloak's `hostname-strict` behavior (see the "Reaching Keycloak by raw
+   IP" entry above) only pins the *hostname* it uses when generating URLs like
+   `verification_uri`/`verification_uri_complete` — it reflects back whatever *port* the originating
+   request actually came in on. Since `KeycloakLoginFlow` sends the device-authorization request
+   through its own local port-forward (`https://keycloak.platform.local:<local_port>`), Keycloak
+   echoes that same local port back into the URL it hands back — not whatever port Keycloak is really
+   deployed on. Confirmed, not assumed: this wasn't previously known about this Keycloak build's
+   hostname provider before this run.
+2. **`_PortForward` bound loopback-only, by design, before this fix.** That was correct for
+   `KeycloakAdminClient` (`workspace invite`'s CLI process is the only thing that ever talks to its
+   forward — no browser involved) but wrong for `KeycloakLoginFlow`: device-flow login fundamentally
+   requires a human's browser to open the exact URL Keycloak generated, and per point 1 above, that
+   URL always points at wherever this specific forward is listening. A loopback-only forward makes
+   that URL unopenable from anywhere but the one process that created it — including the very common
+   case (this one) where `platform login` runs on a headless/remote box and the human's browser is on
+   a different machine entirely.
+
+**Status:** fixed — `_PortForward` now takes a `bind_address` (default `"127.0.0.1"`, unchanged
+behavior for `KeycloakAdminClient`), and `KeycloakLoginFlow` passes `bind_address="0.0.0.0"` so its
+forward is reachable from the wider LAN, not just `localhost`. Covered by two new
+`tests/test_keycloak_connection.py` cases confirming the constructed `kubectl port-forward` command
+carries `--address 127.0.0.1` by default and `--address 0.0.0.0` when explicitly requested — both by
+capturing the argv via a monkeypatched `subprocess.Popen`, no kubectl needed.
+
+**Still needed to actually open the URL from a different machine, and NOT something this fix
+alone solves — the same fix as the "Reaching Keycloak by raw IP" entry above, same reasoning:** a
+hosts-file entry on whichever machine's browser you're using, pointing `keycloak.platform.local` at
+`homelab-dev`'s real LAN IP (not `127.0.0.1`, not the raw IP by itself, and not any of this cluster's
+in-cluster Service DNS names — those only resolve inside the cluster). The port stays whatever
+`platform-cli`'s `keycloak_login_local_port` setting is (`18444` by default) — that part doesn't
+change, since it's still an arbitrary local port being forwarded, just no longer loopback-restricted.
+
+**Bounded exposure, worth being upfront about rather than silently deciding:** binding to `0.0.0.0`
+means Keycloak's HTTPS listener is reachable by anything on the LAN for as long as one `platform
+login` invocation runs — typically well under a minute, and only proxying to Keycloak's own login UI
+(nothing more privileged than what any browser could already reach once this cluster has a real
+Ingress in front of Keycloak, which is the eventual intended state anyway per the "Reaching Keycloak
+by raw IP" entry's closing note). Consistent with this repo's existing homelab/trusted-LAN threat
+model (MetalLB's pool, no firewall by default) — flagged here rather than assumed acceptable without
+saying so.
 
 ### GHCR packages default to private on first publish — one manual step after `ci.yml`'s first push
 

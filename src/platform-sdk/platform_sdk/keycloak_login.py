@@ -115,6 +115,17 @@ class KeycloakLoginFlow:
                 service_name=self._service_name,
                 service_port=self._service_port,
                 local_port=self._local_port,
+                # Not loopback-only, unlike KeycloakAdminClient's forward —
+                # see _PortForward's own constructor comment for the full
+                # reasoning. Bounded exposure: this forward only exists for
+                # the lifetime of one `platform login` invocation (a single
+                # human approving one login, typically under a minute), and
+                # only proxies to Keycloak's own HTTPS listener — nothing
+                # more privileged than what a browser could already reach if
+                # this cluster had its real Ingress in front of Keycloak
+                # yet. Homelab/trusted-LAN tradeoff, consistent with this
+                # repo's existing threat model (see docs/known-issues.md).
+                bind_address="0.0.0.0",
             )
             ca_cert_path = self._port_forward.start()
             self._resolve_patch = _ResolvePatch(self._host, "127.0.0.1")

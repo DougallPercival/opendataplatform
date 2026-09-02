@@ -88,6 +88,7 @@ class _PortForward:
         service_port: int,
         local_port: int,
         ready_timeout_seconds: float = 10.0,
+        bind_address: str = "127.0.0.1",
     ) -> None:
         self._kubectl_cmd = kubectl_cmd.split()
         self._namespace = namespace
@@ -95,6 +96,19 @@ class _PortForward:
         self._service_port = service_port
         self._local_port = local_port
         self._ready_timeout_seconds = ready_timeout_seconds
+        # Loopback-only by default — right for KeycloakAdminClient, whose
+        # own CLI process is the only thing that ever talks to this forward.
+        # KeycloakLoginFlow deliberately overrides this to "0.0.0.0" (see
+        # its own constructor comment for why): Keycloak's hostname provider
+        # only pins the *hostname* under hostname-strict, not the port, so
+        # the verification_uri it generates for a device-flow login reflects
+        # back whatever port the request came in on — meaning that URL is
+        # only ever openable from wherever this forward is actually
+        # reachable. A loopback-only forward makes that URL openable from
+        # nowhere but this exact process's own machine, which defeats the
+        # point of a URL a human is meant to open in a browser (found live,
+        # 2026-09-02 — see docs/known-issues.md).
+        self._bind_address = bind_address
         self._process: subprocess.Popen | None = None
         self._ca_cert_path: Path | None = None
 
@@ -104,6 +118,8 @@ class _PortForward:
             [
                 *self._kubectl_cmd,
                 "port-forward",
+                "--address",
+                self._bind_address,
                 "-n",
                 self._namespace,
                 f"svc/{self._service_name}",

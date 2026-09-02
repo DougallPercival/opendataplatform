@@ -1,19 +1,28 @@
-"""Unit tests for `_PortForward._wait_ready()` specifically — NOT for the
-rest of `_PortForward`/`_ResolvePatch`, which still need a real kubectl and
-a live cluster and stay confirmed-live-only (see test_keycloak_admin.py's
-own docstring for that reasoning, unchanged here).
+"""Unit tests for two narrow, genuinely-unit-testable slices of
+`_PortForward` — `_wait_ready()`'s readiness logic and `start()`'s
+constructed kubectl command — NOT the rest of `_PortForward`/`_ResolvePatch`,
+which still need a real kubectl and a live cluster and stay
+confirmed-live-only (see test_keycloak_admin.py's own docstring for that
+reasoning, unchanged here).
 
-`_wait_ready()` is different: it's pure socket-readiness logic with no
-kubectl/cluster dependency of its own, so it's fully testable against a
-throwaway local TCP/TLS listener spun up in-process. Added 2026-09-02 after
-a real bug found via live testing (see `_keycloak_connection.py`'s own
-comment on `_wait_ready` for the full story): the original check only
-confirmed a bare TCP accept, which `platform login`'s first live run showed
-isn't enough — `kubectl port-forward` can open its local listener slightly
-before the reverse tunnel to the pod is actually usable, so an early
-connection gets accepted and then reset mid-TLS-handshake. These tests
-pin down the fix (requiring a full handshake) against both a listener that
-completes one and a listener that never will.
+Both bugs covered here were found the same way: live testing on
+2026-09-02, `platform login`'s actual first run against a real cluster
+(see `_keycloak_connection.py`'s own comments on `_wait_ready` and
+`bind_address` for the full story in each case, and docs/known-issues.md
+for the live symptoms).
+
+`_wait_ready()` is pure socket-readiness logic with no kubectl/cluster
+dependency of its own, so it's fully testable against a throwaway local
+TCP/TLS listener spun up in-process. The original check only confirmed a
+bare TCP accept, which wasn't enough — `kubectl port-forward` can open its
+local listener slightly before the reverse tunnel to the pod is actually
+usable, so an early connection gets accepted and then reset
+mid-TLS-handshake.
+
+`start()`'s command construction is also pure (a list of strings), testable
+by monkeypatching `subprocess.Popen`/`subprocess.run` to capture the argv
+instead of actually shelling out — confirms `bind_address` reaches the
+`--address` flag `kubectl port-forward` actually reads.
 """
 from __future__ import annotations
 
@@ -176,3 +185,77 @@ def test_wait_ready_raises_when_nothing_is_listening_at_all() -> None:
     pf = _port_forward_stub(port, ready_timeout_seconds=1.0)
     with pytest.raises(KeycloakAdminError, match="never came up"):
         pf._wait_ready()
+
+
+def test_start_defaults_to_loopback_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **_kwargs):  # stands in for the `kubectl get secret` call
+        class _Result:
+            stdout = "dGVzdA=="  # base64("test") — just needs to decode to something non-empty
+
+        return _Result()
+
+    class _FakePopen:
+        def __init__(self, cmd, **_kwargs) -> None:
+            captured["cmd"] = cmd
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout=None) -> None:
+            pass
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(_PortForward, "_wait_ready", lambda self: None)  # skip the real socket wait
+
+    pf = _PortForward(
+        kubectl_cmd="kubectl",
+        namespace="keycloak",
+        service_name="platform-service",
+        service_port=8443,
+        local_port=18443,
+    )
+    pf.start()
+    assert "--address" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--address") + 1] == "127.0.0.1"
+
+
+def test_start_honors_an_explicit_bind_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression test for the actual bug: KeycloakLoginFlow's forward needs
+    # to be reachable by whatever machine's browser the human uses, not
+    # just the machine `platform login` runs on — see keycloak_login.py's
+    # own comment on why it passes bind_address="0.0.0.0".
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **_kwargs):
+        class _Result:
+            stdout = "dGVzdA=="
+
+        return _Result()
+
+    class _FakePopen:
+        def __init__(self, cmd, **_kwargs) -> None:
+            captured["cmd"] = cmd
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout=None) -> None:
+            pass
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(_PortForward, "_wait_ready", lambda self: None)
+
+    pf = _PortForward(
+        kubectl_cmd="kubectl",
+        namespace="keycloak",
+        service_name="platform-service",
+        service_port=8443,
+        local_port=18444,
+        bind_address="0.0.0.0",
+    )
+    pf.start()
+    assert captured["cmd"][captured["cmd"].index("--address") + 1] == "0.0.0.0"
