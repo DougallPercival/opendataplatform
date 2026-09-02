@@ -33,52 +33,46 @@ metadata:
   namespace: keycloak
 spec:
   instances: 1
-  # Not reachable yet either way — ingress.enabled is false below, so this
-  # hostname isn't blocking anything right now. Once platform-gateway exists
-  # and this gets a real Ingress, resolve it with an /etc/hosts entry on
-  # whatever devices need it (decision 2026-08-30: no local DNS server, so
-  # /etc/hosts per-device rather than a router-level A record) pointed at
-  # whatever IP ingress-nginx picks up from metallb-pool.yaml.
+  # Now genuinely load-bearing for external routing (2026-09-02,
+  # platform-ingress branch): the new Ingress resource at the bottom of this
+  # file routes this exact hostname to platform-service. Resolve it with an
+  # /etc/hosts entry on whatever devices need it (decision 2026-08-30: no
+  # local DNS server, so /etc/hosts per-device rather than a router-level A
+  # record) pointed at ingress-nginx's real LoadBalancer IP (from
+  # metallb-pool.yaml, confirm live with `kubectl get svc -n ingress-nginx`).
   hostname:
     hostname: keycloak.platform.local
-  # Pins the PORT Keycloak stamps into every URL it generates (redirects,
-  # device-flow verification_uri, and critically the `iss` claim of every
-  # token it issues) — hostname.hostname above only pins the hostname part.
-  # Without this, Keycloak infers the port from whatever request it's
-  # currently handling, which is fine for one-off Admin API calls
-  # (bootstrap scripts, KeycloakAdminClient) but breaks `platform login`:
-  # found live, 2026-09-02 — every token minted through the CLI's own
-  # ephemeral port-forward carried an `iss` claim tied to that exact
-  # ephemeral port, which could never match platform-gateway's fixed
-  # GATEWAY_KEYCLOAK_PUBLIC_URL (see manifests/gateway.yaml), so every
-  # request 401'd with "Invalid issuer." This CRD version has no typed
-  # hostname.port field (confirmed via `kubectl explain
-  # keycloak.spec.hostname --recursive` against the live cluster before
-  # relying on it) — additionalOptions is the Operator's documented
-  # escape hatch for passing raw Keycloak server options
-  # (https://www.keycloak.org/server/all-config) straight through as
-  # KC_* env vars, confirmed present via `kubectl explain
-  # keycloak.spec.additionalOptions --recursive` the same way.
+  # additionalOptions is the Operator's documented escape hatch for passing
+  # raw Keycloak server options (https://www.keycloak.org/server/all-config)
+  # straight through as KC_* env vars (confirmed present via `kubectl explain
+  # keycloak.spec.additionalOptions --recursive` against the live cluster —
+  # this CRD version has no typed field for either option below).
   #
-  # 18444 matches platform_sdk/config.py's keycloak_login_local_port —
-  # `platform login`'s own dedicated local port-forward — so its forward
-  # doubles as the browser-facing endpoint too, no separate manual
-  # port-forward needed just for login. Deliberately NOT 8443 (Keycloak's
-  # real internal port, and the port already used for manual admin-console
-  # access) to avoid exactly the kind of stale/colliding-forward bug
-  # already hit once this session with keycloak-bootstrap-login-client.sh's
-  # own port-forward — a separate, dedicated port avoids that class of
-  # problem entirely rather than relying on remembering to close things in
-  # the right order.
+  # proxy-headers: xforwarded (2026-09-02, platform-ingress branch) — makes
+  # hostname-strict trust nginx's X-Forwarded-Proto/Host/Port instead of the
+  # raw backend connection (https://www.keycloak.org/server/reverseproxy),
+  # so every URL Keycloak generates (redirects, device-flow
+  # verification_uri, and critically the `iss` claim of every token it
+  # issues) correctly reads "https://keycloak.platform.local" with no port —
+  # 443 is implied, the same as any ordinary HTTPS site, once requests
+  # arrive via the Ingress instead of a raw port-forward. Needs live
+  # confirmation the first time this deploys behind the real Ingress below;
+  # if this option alone doesn't produce port-free URLs, the fallback is
+  # pinning `hostname-port: "443"` explicitly via this same
+  # additionalOptions mechanism (the same knob the interim "18444" value
+  # below used to prove out) — see docs/known-issues.md if that ever needs
+  # revisiting.
   #
-  # Interim, not permanent: this whole pin goes away once this cluster has
-  # a real Ingress in front of Keycloak (see the hostname.hostname comment
-  # above, and docs/known-issues.md's "Reaching Keycloak by raw IP" entry)
-  # — at that point Keycloak serves on the Ingress's standard port and
-  # omits it from generated URLs entirely, same as any normal HTTPS site.
+  # This REPLACES the interim `hostname-port: "18444"` pin from the
+  # platform-gateway-auth branch: that value existed only because nothing
+  # yet made Keycloak's *port* stable, and gateway.yaml's
+  # GATEWAY_KEYCLOAK_PUBLIC_URL had to hardcode the same "18444" to match.
+  # Both are gone now that a real Ingress makes the standard 443 port
+  # stable on its own — see gateway.yaml's own comment for the matching
+  # edit on that side.
   additionalOptions:
-    - name: hostname-port
-      value: "18444"
+    - name: proxy-headers
+      value: xforwarded
   http:
     tlsSecret: keycloak-tls
   db:
@@ -90,8 +84,16 @@ spec:
     passwordSecret:
       name: platform-postgres-keycloak-credentials
       key: password
+  # Stays false — the Operator's OWN built-in Ingress management (this
+  # field) is a separate mechanism from the explicit Ingress resource added
+  # below (2026-09-02, platform-ingress branch). Managing our own Ingress
+  # manifest, same convention as everything else in this repo (explicit
+  # Certificate resources instead of cert-manager's Ingress-shim
+  # annotations, etc.), gives full control over the backend-protocol/
+  # proxy-ssl-* annotations Keycloak's HTTPS-only listener needs — the
+  # Operator's ingress.enabled shortcut doesn't expose those.
   ingress:
-    enabled: false   # platform-gateway will proxy to this later (ARCHITECTURE.md §2); no direct ingress needed yet
+    enabled: false
 ---
 # Keycloak's own internal HTTPS listener cert (http.tlsSecret above) — required
 # for the pod to start regardless of ingress.enabled. Off platform-ca so it's
@@ -111,6 +113,12 @@ spec:
 # Both the short (`.svc`) and fully-qualified (`.svc.cluster.local`) forms
 # are listed since Kubernetes clients may present either as the SNI/Host
 # depending on how the target is written in config.
+#
+# Dual-purpose since 2026-09-02 (platform-ingress branch): the Ingress
+# below reuses this exact Secret as its own `tls.secretName` — no second
+# Certificate needed, since it's already got keycloak.platform.local in its
+# SAN list and its Secret already lives in this same `keycloak` namespace,
+# which is exactly where an Ingress's tls.secretName must resolve.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -125,3 +133,53 @@ spec:
   issuerRef:
     name: platform-ca
     kind: ClusterIssuer
+---
+# The Ingress itself (2026-09-02, platform-ingress branch) — the actual
+# reason keycloak.platform.local is reachable from off-cluster at all now,
+# replacing every manual `kubectl port-forward` that used to be the only
+# way to reach Keycloak from a browser or the CLI. Lives in the `keycloak`
+# namespace (an Ingress's backend Service must be in its OWN namespace —
+# see gateway.yaml's matching Ingress, in the `gateway` namespace, for the
+# same rule applied there) but shares ingress-nginx's single controller/
+# LoadBalancer IP with that one — ingress-nginx merges Ingress objects
+# across every namespace onto one IP, this isn't two separate front doors.
+#
+# backend-protocol: HTTPS + proxy-ssl-* — Keycloak's Service only has an
+# HTTPS listener (http.tlsSecret above, no httpEnabled), so nginx has to
+# speak HTTPS to reach it, not the plain-HTTP default. proxy-ssl-verify: on
+# against platform-ca-secret (in the cert-manager namespace, not mirrored
+# here — ingress-nginx's own ClusterRole already permits reading Secrets
+# cluster-wide for exactly this annotation) means that hop is verified, not
+# just encrypted: nginx checks Keycloak's cert is actually signed by
+# platform-ca before trusting it, the same standard every other in-cluster
+# TLS hop in this repo (e.g. gateway -> Keycloak) already holds itself to.
+# Needs live confirmation this annotation is honored without extra RBAC on
+# this specific k3s/ingress-nginx version — flag in docs/known-issues.md if
+# not.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  namespace: keycloak
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/proxy-ssl-secret: "cert-manager/platform-ca-secret"
+    nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"
+    nginx.ingress.kubernetes.io/proxy-ssl-name: "keycloak.platform.local"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - keycloak.platform.local
+      secretName: keycloak-tls
+  rules:
+    - host: keycloak.platform.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: platform-service
+                port:
+                  number: 8443
