@@ -275,3 +275,88 @@ def test_client_is_a_context_manager():
     # harmless no-op (httpx's own contract), just confirming this doesn't
     # raise rather than asserting anything deeper about httpx's internals.
     c.close()
+
+
+# ---- CA pinning (2026-09-02, platform-ingress branch) ---------------------
+#
+# Regression tests for a real bug found live the same day: gateway_url's
+# default moved from a plain-HTTP port-forward to a real https:// Ingress
+# hostname, and PlatformClient never pinned a CA for it — every request
+# failed with CERTIFICATE_VERIFY_FAILED against platform-ca's self-signed
+# cert. See client.py's own module docstring for the full story — including
+# a SECOND bug found immediately after the first fix: extracting the CA
+# eagerly in __init__ broke `platform login` itself, since
+# platform_cli/main.py's callback constructs a PlatformClient for every
+# command whether or not it ends up sending a request. These tests exercise
+# _ensure_http() directly (the lazy build), not just construction, since
+# construction alone no longer touches kubectl either way.
+
+
+def test_https_gateway_url_pins_the_platform_ca_cert_on_first_use(monkeypatch):
+    calls: list[str] = []
+
+    def _fake_extract(kubectl_cmd: str) -> str:
+        calls.append(kubectl_cmd)
+        return "/tmp/fake-ca.crt"
+
+    monkeypatch.setattr("platform_sdk.client.extract_platform_ca_cert", _fake_extract)
+    monkeypatch.setattr("platform_sdk.client.cleanup_ca_cert", lambda _path: None)
+
+    # A fake httpx.Client stand-in rather than the real thing: the real one
+    # would actually try to load "/tmp/fake-ca.crt" as a cert file and fail
+    # with FileNotFoundError — this test only needs to confirm PlatformClient
+    # *asked* for that path to be trusted, not that httpx can load it.
+    captured: dict[str, object] = {}
+
+    class _FakeHttpxClient:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("platform_sdk.client.httpx.Client", _FakeHttpxClient)
+
+    c = PlatformClient(gateway_url="https://gateway.platform.local")
+    assert calls == []  # not yet — construction alone must not touch kubectl
+
+    c._ensure_http()
+    assert calls == ["sudo /usr/local/bin/kubectl"]  # config.py's own default
+    assert captured["verify"] == "/tmp/fake-ca.crt"
+
+    c._ensure_http()  # a second call must reuse the same client, not re-extract
+    assert calls == ["sudo /usr/local/bin/kubectl"]
+
+    c.close()
+
+
+def test_constructing_a_platform_client_never_touches_kubectl(monkeypatch):
+    # Regression test for the second bug: platform_cli/main.py's Typer
+    # callback constructs a PlatformClient for EVERY command, including
+    # `login`/`workspace invite`, which never send it a request at all — so
+    # __init__ itself must never call extract_platform_ca_cert, regardless
+    # of gateway_url's scheme, or `platform login` breaks whenever kubectl
+    # isn't reachable (exactly backwards: login is the one command that
+    # shouldn't need gateway access yet).
+    def _fail_if_called(kubectl_cmd: str) -> str:
+        raise AssertionError("extract_platform_ca_cert() must not be called from __init__")
+
+    monkeypatch.setattr("platform_sdk.client.extract_platform_ca_cert", _fail_if_called)
+
+    c = PlatformClient(gateway_url="https://gateway.platform.local")
+    c.close()  # never having built a client, cleanup_ca_cert(None) — no-op
+
+
+def test_http_gateway_url_never_touches_kubectl_even_on_first_use(monkeypatch):
+    # The test suite's own BASE_URL ("http://gateway.test") already exercises
+    # this implicitly in every other test in this file — this one pins it
+    # explicitly, and proves it by making extract_platform_ca_cert raise if
+    # it's ever called, rather than just not asserting on it.
+    def _fail_if_called(kubectl_cmd: str) -> str:
+        raise AssertionError("extract_platform_ca_cert() should never be called for a plain-HTTP gateway_url")
+
+    monkeypatch.setattr("platform_sdk.client.extract_platform_ca_cert", _fail_if_called)
+
+    c = PlatformClient(gateway_url=BASE_URL)
+    c._ensure_http()  # the actual lazy build — still must not touch kubectl
+    c.close()

@@ -30,6 +30,40 @@ exist anymore (config.py's docstring covers why removing them, not just
 ignoring them, was the right call). Not logged in? `PlatformClient` raises
 `NotAuthenticatedError` the first time it needs to send a request, naming
 the fix (`platform login`) rather than a bare 401 from gateway.
+
+TLS trust (added 2026-09-02, platform-ingress branch): `gateway_url`'s
+default changed from `http://localhost:8080` (a plain-HTTP port-forward, no
+TLS at all) to the real `https://gateway.platform.local` Ingress — found
+live the moment this shipped: every request failed with
+`CERTIFICATE_VERIFY_FAILED`, because gateway's Ingress cert is signed by
+this cluster's self-signed `platform-ca`, which isn't in any system trust
+store. Fixed the same way `KeycloakAdminClient`/`KeycloakLoginFlow` already
+handle this — `extract_platform_ca_cert()` (`_keycloak_connection.py`) reads
+`platform-ca-secret` via `kubectl` and pins it as this client's own
+`verify=`, but only when `gateway_url` is actually `https://` (the test
+suite's mocked `http://gateway.test` base_url skips this entirely, so
+`kubectl` is never invoked in tests). This does mean `platform` commands now
+assume `kubectl` access on whatever machine runs them — true of every other
+Keycloak-touching path in this repo already (`platform login` itself has
+needed it since before this branch), so not new scope, just extended to
+this class too. The documented alternative — importing `platform-ca` into
+the machine's own OS/browser trust store once (see
+`manifests/cluster-issuer.yaml`'s header comment) — would let this default
+back off; worth revisiting if `platform-cli` ever needs to run somewhere
+without `kubectl` configured.
+
+CA extraction is LAZY, not done in `__init__` — found live immediately
+after the first version of this fix: `platform_cli/main.py`'s Typer
+callback constructs a `PlatformClient` unconditionally for every command,
+including `login` and `workspace invite`, which build their own separate
+`KeycloakLoginFlow`/`KeycloakAdminClient` and never touch this one at all.
+An eager `extract_platform_ca_cert()` call in `__init__` meant `platform
+login` itself broke if `kubectl` wasn't reachable — exactly backwards, since
+`login` is the one command that shouldn't need to already be talking to
+gateway. `_ensure_http()` below defers building the actual `httpx.Client`
+(CA extraction included) until the first real request, same "checked once,
+on first use" shape `_ensure_token()` already has — never called at all by
+a command that never sends one.
 """
 from __future__ import annotations
 
@@ -39,6 +73,7 @@ from uuid import UUID
 
 import httpx
 
+from platform_sdk._keycloak_connection import cleanup_ca_cert, extract_platform_ca_cert
 from platform_sdk.config import SDKSettings
 from platform_sdk.credentials import load_credentials, save_credentials
 from platform_sdk.exceptions import NotAuthenticatedError, PlatformAPIError
@@ -73,7 +108,12 @@ class PlatformClient:
         self._settings = settings
         self._base_url = (gateway_url or settings.gateway_url).rstrip("/")
         self._workspace = workspace or settings.workspace
-        self._http = httpx.Client(base_url=self._base_url, timeout=timeout)
+        self._timeout = timeout
+        # Built lazily by _ensure_http() on the first actual request, not
+        # here — see this module's docstring for why an eager kubectl call
+        # in __init__ was a real bug, not just premature work.
+        self._http: httpx.Client | None = None
+        self._ca_cert_path: str | None = None
         # Loaded (and refreshed, if needed) at most once per PlatformClient
         # instance — see _ensure_token()'s own comment for why this is a
         # deliberate "one check per invocation," not a re-check-every-call
@@ -81,8 +121,26 @@ class PlatformClient:
         self._token_set: TokenSet | None = None
         self._token_checked = False
 
+    def _ensure_http(self) -> httpx.Client:
+        if self._http is not None:
+            return self._http
+        # Only pin a CA when there's actually TLS to verify — the test
+        # suite's mocked http://gateway.test base_url (and anyone who
+        # deliberately overrides gateway_url back to a plain-HTTP
+        # port-forward) never touches kubectl at all.
+        if self._base_url.startswith("https://"):
+            self._ca_cert_path = extract_platform_ca_cert(self._settings.keycloak_kubectl_cmd)
+        self._http = httpx.Client(
+            base_url=self._base_url, timeout=self._timeout, verify=self._ca_cert_path or True
+        )
+        return self._http
+
     def close(self) -> None:
-        self._http.close()
+        if self._http is not None:
+            self._http.close()
+            self._http = None
+        cleanup_ca_cert(self._ca_cert_path)
+        self._ca_cert_path = None
 
     def __enter__(self) -> PlatformClient:
         return self
@@ -137,7 +195,7 @@ class PlatformClient:
         }
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        response = self._http.request(method, path, headers=self._headers(), **kwargs)
+        response = self._ensure_http().request(method, path, headers=self._headers(), **kwargs)
         if response.status_code >= 400:
             try:
                 detail = response.json().get("detail", response.text)
