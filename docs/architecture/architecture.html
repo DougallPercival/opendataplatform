@@ -400,11 +400,12 @@
             <h4>Storage</h4>
             <p class="layer-desc">One object store as the lake, one relational store for anything transactional or small. Table format is optional until you actually need time travel or schema evolution.</p>
             <div class="chips">
-              <span class="chip core">MinIO (S3 API)</span>
+              <span class="chip core">SeaweedFS (S3 API)</span>
               <span class="chip core">Postgres — CloudNativePG</span>
               <span class="chip module">Iceberg table format</span>
               <span class="chip module">Redis (cache / queue)</span>
             </div>
+            <p class="layer-desc" style="margin-top:0.5rem; font-size:0.85em; opacity:0.8;"><b>SeaweedFS, not MinIO</b> (updated 2026-08-31) — MinIO's Community Edition was archived upstream Feb 13, 2026, before this layer was ever built here. Same S3 API surface either way; see ARCHITECTURE.md's own note on this layer for the full story.</p>
           </div>
         </div>
         <div class="layer">
@@ -424,7 +425,7 @@
           <span class="layer-num">04</span>
           <div>
             <h4>Query &amp; Virtualization</h4>
-            <p class="layer-desc">Your Denodo analog — one SQL surface federated across Postgres, MinIO/Iceberg, and anything else with a connector, without copying data around.</p>
+            <p class="layer-desc">Your Denodo analog — one SQL surface federated across Postgres, SeaweedFS/Iceberg, and anything else with a connector, without copying data around.</p>
             <div class="chips">
               <span class="chip module">Trino</span>
               <span class="chip module">dbt (declarative SQL transforms)</span>
@@ -530,7 +531,7 @@ optional: true</code></pre>
           <tbody>
             <tr><td>Keycloak group</td><td>Membership + role (owner / editor / viewer), enforced by SSO everywhere, not per-app</td></tr>
             <tr><td>k8s namespace</td><td>Resource quotas, network policy, RBAC — a runaway Spark job in one workspace can't starve another</td></tr>
-            <tr><td>MinIO bucket prefix</td><td><code>s3://lake/&lt;workspace&gt;/...</code> with bucket policy scoped per prefix</td></tr>
+            <tr><td>SeaweedFS bucket prefix</td><td><code>s3://lake/&lt;workspace&gt;/...</code> with bucket policy scoped per prefix</td></tr>
             <tr><td>Postgres schema</td><td><code>&lt;workspace&gt;.*</code> tables, one database role per workspace</td></tr>
           </tbody>
         </table>
@@ -587,7 +588,7 @@ optional: true</code></pre>
           <span class="node-role">Storage</span>
           <h4>node-b</h4>
           <ul>
-            <li>MinIO</li>
+            <li>SeaweedFS</li>
             <li>Longhorn / NFS volumes</li>
             <li>Postgres (warehouse), if split from node-a</li>
             <li>Trino coordinator</li>
@@ -631,16 +632,16 @@ optional: true</code></pre>
         <table>
           <thead><tr><th>What</th><th>Where it lives</th><th>How it's backed up</th></tr></thead>
           <tbody>
-            <tr><td>Catalog + workspace metadata</td><td>Postgres (catalog-lite schema)</td><td>CloudNativePG's built-in WAL archiving + base backups, continuously, to a dedicated MinIO bucket — point-in-time recovery, not just nightly snapshots</td></tr>
+            <tr><td>Catalog + workspace metadata</td><td>Postgres (catalog-lite schema)</td><td>CloudNativePG's built-in WAL archiving + base backups, continuously, to a dedicated SeaweedFS bucket — point-in-time recovery, not just nightly snapshots</td></tr>
             <tr><td>Keycloak realm (users, groups, workspaces)</td><td>Postgres (Keycloak schema)</td><td>Same CloudNativePG mechanism, same bucket</td></tr>
-            <tr><td>The actual data lake</td><td>MinIO</td><td>On-cluster: Longhorn/NFS replication protects against one disk or node dying. Off-cluster: a scheduled <code>mc mirror</code> of critical buckets to an external drive or offsite location — on-cluster redundancy alone doesn't survive a fire, theft, or a bad <code>rm</code></td></tr>
+            <tr><td>The actual data lake</td><td>SeaweedFS</td><td>On-cluster: Longhorn/NFS replication protects against one disk or node dying. Off-cluster: a scheduled <code>rclone sync</code> of critical buckets to an external drive or offsite location — on-cluster redundancy alone doesn't survive a fire, theft, or a bad <code>rm</code></td></tr>
             <tr><td>Secrets encryption key (sealed-secrets private key, or Vault unseal keys)</td><td>Nowhere reproducible</td><td>Exported and stored <i>outside</i> the cluster the moment it's generated — lose this and every other backup is unreadable ciphertext</td></tr>
-            <tr><td>k3s cluster datastore (etcd/sqlite)</td><td><code>node-a</code></td><td>k3s's built-in <code>etcd-snapshot</code> (or a cron'd copy of the sqlite file), sent to the same offsite destination as the secrets key</td></tr>
+            <tr><td>k3s cluster datastore (SQLite by default; etcd if <code>--cluster-init</code>)</td><td><code>node-a</code></td><td><code>bootstrap/snapshot-setup.sh</code> — a systemd timer running a SQLite online <code>.backup</code> (not k3s's built-in <code>etcd-snapshot</code>, which is etcd-only), with optional <code>rclone</code> push to any cloud remote</td></tr>
             <tr><td>Argo CD's own state</td><td>Git + a few in-cluster repo-credential secrets</td><td>Effectively already backed up — it's git. Only the repo credentials need to ride along with the secrets-key backup above</td></tr>
           </tbody>
         </table>
       </div>
-      <p style="margin-top:1rem; max-width:70ch"><b>What recovery actually looks like</b> if <code>node-a</code> dies outright: provision a replacement, restore the k3s datastore snapshot and the secrets encryption key, point it at the git repo, and Argo CD reconciles <code>core/</code> and <code>modules-enabled/</code> back into existence on its own — that's the payoff of everything being declarative. Then restore the two Postgres databases from their CloudNativePG backups. MinIO's data was never on <code>node-a</code> to begin with (it lives on <code>node-b</code>, per §6), so it's untouched throughout. Total recovery time is bounded by how fast two databases restore and one script re-runs, not by how much configuration you remember by hand.</p>
+      <p style="margin-top:1rem; max-width:70ch"><b>What recovery actually looks like</b> if <code>node-a</code> dies outright: provision a replacement, restore the k3s datastore snapshot and the secrets encryption key, point it at the git repo, and Argo CD reconciles <code>core/</code> and <code>modules-enabled/</code> back into existence on its own — that's the payoff of everything being declarative. Then restore the two Postgres databases from their CloudNativePG backups. SeaweedFS's data was never on <code>node-a</code> to begin with (it lives on <code>node-b</code>, per §6), so it's untouched throughout. Total recovery time is bounded by how fast two databases restore and one script re-runs, not by how much configuration you remember by hand.</p>
       <p class="reuse-note" style="max-width:70ch"><b>What this design doesn't give you: zero-downtime failover.</b> A single control node means a control-node failure is an outage, not a seamless handoff — acceptable for a single low-stakes deployment, less so for a team depending on this daily. See §12 for the upgrade path.</p>
     </section>
 
@@ -654,7 +655,7 @@ optional: true</code></pre>
         <p class="uc-what">Continuous ingestion, ad hoc exploration, a standing dashboard.</p>
         <div class="flow">
           <div class="flow-step"><span class="fs-label">Ingest</span>Dagster job hits price API, news API, Reddit via PRAW on a schedule</div>
-          <div class="flow-step"><span class="fs-label">Land</span>Raw JSON/parquet → <code class="mono">minio://bronze/stocks/</code></div>
+          <div class="flow-step"><span class="fs-label">Land</span>Raw JSON/parquet → <code class="mono">s3://bronze/stocks/</code></div>
           <div class="flow-step"><span class="fs-label">Transform</span>Polars job joins price + mentions, scores sentiment → Postgres/Iceberg</div>
           <div class="flow-step"><span class="fs-label">Catalog</span>Tables + the sentiment-scorer function registered</div>
           <div class="flow-step"><span class="fs-label">Serve</span>Streamlit ticker dashboard, ad hoc SQL in Jupyter via Trino</div>
@@ -666,7 +667,7 @@ optional: true</code></pre>
         <p class="uc-what">Weekly cadence, a trained model, a "what should I look at" UI.</p>
         <div class="flow">
           <div class="flow-step"><span class="fs-label">Ingest</span>Weekly job pulls odds + team/player stats APIs</div>
-          <div class="flow-step"><span class="fs-label">Land</span><code class="mono">minio://bronze/nfl/</code></div>
+          <div class="flow-step"><span class="fs-label">Land</span><code class="mono">s3://bronze/nfl/</code></div>
           <div class="flow-step"><span class="fs-label">Transform</span>Feature pipeline scores edges; model version pulled from MLflow</div>
           <div class="flow-step"><span class="fs-label">Catalog</span>Dataset + model version registered</div>
           <div class="flow-step"><span class="fs-label">Serve</span>Streamlit "this week's value bets" app, reads Postgres directly</div>
@@ -679,7 +680,7 @@ optional: true</code></pre>
         <p class="uc-what">Bursty, deadline-driven, needs a fast turnaround from dataset to submission.</p>
         <div class="flow">
           <div class="flow-step"><span class="fs-label">Ingest</span>Manual trigger pulls the Kaggle dataset</div>
-          <div class="flow-step"><span class="fs-label">Land</span><code class="mono">minio://bronze/march-madness/</code></div>
+          <div class="flow-step"><span class="fs-label">Land</span><code class="mono">s3://bronze/march-madness/</code></div>
           <div class="flow-step"><span class="fs-label">Transform</span>Reuses NFL's feature functions + existing model from the registry</div>
           <div class="flow-step"><span class="fs-label">Catalog</span>Run + submission logged, so you can compare seasons later</div>
           <div class="flow-step"><span class="fs-label">Serve</span><code>submission.csv</code> in the UI, results browsable in Jupyter</div>
@@ -699,7 +700,7 @@ optional: true</code></pre>
     ui-shell/               # the one front door + workspace switcher
     auth/                    # Keycloak realm + client + workspace-group config
   modules/                    # every module the repo KNOWS how to install (the catalog)
-    storage-minio/
+    storage-seaweedfs/
     storage-postgres/
     query-trino/
     orchestration-dagster/
@@ -720,6 +721,26 @@ optional: true</code></pre>
     nfl-betting/
     march-madness/
   docs/</code></pre>
+
+      <h3>Branching &amp; CI</h3>
+      <p style="max-width:66ch">Three long-lived branches, each a step of promotion: <code>main</code> (stable, what you'd stand a deployment up from) &larr; <code>test</code> (integration-validated, candidate for <code>main</code>) &larr; <code>dev</code> (where feature branches land first). Everything else is a short-lived <code>feature/&lt;name&gt;</code> (or <code>fix/&lt;name&gt;</code>) branch cut from <code>dev</code>, merged back into <code>dev</code> via PR, then never touched again.</p>
+      <p style="max-width:66ch">Promotion between the three long-lived branches is also a PR, never a direct push — <code>dev &rarr; test</code> and <code>test &rarr; main</code> — even solo, so every promotion gets a diff and a CI run instead of trusting memory. <code>main</code>, <code>test</code>, and <code>dev</code> are all protected: no direct pushes, PR required, CI must pass before merge. This also happens to line up with how the platform itself is deployed (§3, §6) — if you ever run separate dev/test/prod clusters, Argo CD can point each one at the matching branch, so branch promotion and environment promotion become the same motion instead of two.</p>
+      <p style="max-width:66ch">CI (GitHub Actions, <code>.github/workflows/ci.yml</code>) runs on every PR into <code>dev</code>/<code>test</code>/<code>main</code>, path-filtered so it only lints what actually changed and stays green while most of the repo is still empty:</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Changed paths</th><th>Check</th></tr></thead>
+          <tbody>
+            <tr><td><code>**/*.md</code></td><td>markdownlint</td></tr>
+            <tr><td><code>**/*.yml</code>, <code>**/*.yaml</code></td><td>yamllint</td></tr>
+            <tr><td><code>src/**/*.py</code>, <code>platform-sdk/**</code>, <code>platform-cli/**</code></td><td>ruff + pytest</td></tr>
+            <tr><td><code>**/*.sh</code></td><td>shellcheck</td></tr>
+            <tr><td><code>**/Dockerfile*</code></td><td>hadolint</td></tr>
+            <tr><td><code>charts/**</code>, <code>**/Chart.yaml</code></td><td><code>helm lint</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="max-width:66ch">Each check is a no-op until there's something of that kind to lint, so the pipeline doesn't start red on a docs-only repo — it grows teeth as <code>src/</code>, <code>charts/</code>, and <code>bootstrap/*.sh</code> fill in.</p>
     </section>
 
     <section id="roadmap" class="wide">
@@ -733,7 +754,7 @@ optional: true</code></pre>
           </thead>
           <tbody>
             <tr><td class="num">0</td><td>Infrastructure bedrock</td><td>A cluster that stays up</td><td>k3s, MetalLB, ingress, cert-manager, Longhorn/NFS, Keycloak realm + workspace-group model (seeds one <code>personal</code> workspace), Argo CD, secrets, node role labels/taints + <code>join-node.sh</code>, <code>bootstrap/teardown.sh</code>, k3s datastore snapshot schedule, Prometheus/Grafana/Loki</td></tr>
-            <tr><td class="num">1</td><td>Storage</td><td>Somewhere to land data</td><td>MinIO, Postgres (CloudNativePG) with WAL-archive backups to MinIO, offsite <code>mc mirror</code> for critical buckets</td></tr>
+            <tr><td class="num">1</td><td>Storage</td><td>Somewhere to land data</td><td>SeaweedFS, Postgres (CloudNativePG) with WAL-archive backups to SeaweedFS, offsite <code>rclone sync</code> for critical buckets</td></tr>
             <tr><td class="num">2</td><td>Catalog &amp; shared code</td><td>Things become findable and reusable</td><td>catalog-lite (with <code>workspace_id</code> + visibility on every table), function publish/versioning, <code>platform module uninstall --purge-data</code>, platform-sdk, platform-cli, <code>platform workspace</code> commands, git remote</td></tr>
             <tr><td class="num">3</td><td>Query + exploration</td><td>You can actually look at your data</td><td>Trino, JupyterHub — bundled together since one needs the other</td></tr>
             <tr><td class="num">4</td><td>Orchestration</td><td>Ingestion stops being a cron job on your laptop</td><td>Dagster + daemon, cron schedule + asset sensor for stocks, failure-hook alerting</td></tr>

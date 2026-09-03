@@ -1,0 +1,305 @@
+# First CI workflow in this repo (2026-09-01) — covers catalog-service
+# (test, then build+push its image) and, added the same day once they
+# existed, platform-sdk + platform-cli (lint+test only — they're a library
+# and a CLI tool, not something that gets built into a container image).
+# `gateway` (platform-gateway-auth branch, 2026-09-02) joined as a fourth
+# path/package — build+push like catalog-service (it's a container image
+# too), wired the same way that one was: a paths-filter output, a
+# test-<pkg> job, a build-and-push-<pkg> job. The full path-filtered matrix
+# ARCHITECTURE.md §10 and CONTRIBUTING.md describe (markdownlint, yamllint,
+# shellcheck, hadolint, helm lint) is still aspirational — add those jobs as
+# the pieces they'd actually check show up, same "don't build what the
+# current phase doesn't need yet" pattern the rest of this repo follows.
+# This file's own path filter below is deliberately narrow for the same
+# reason: it shouldn't fire on changes that have nothing to do with any of
+# these four packages.
+name: CI
+
+on:
+  push:
+    branches: [dev, test, main]
+    paths:
+      - "src/core/catalog-service/**"
+      - "src/core/gateway/**"
+      - "src/platform-sdk/**"
+      - "src/platform-cli/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [dev, test, main]
+    paths:
+      - "src/core/catalog-service/**"
+      - "src/core/gateway/**"
+      - "src/platform-sdk/**"
+      - "src/platform-cli/**"
+      - ".github/workflows/ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # Added alongside platform-sdk/platform-cli's own job below: with the top-
+  # level `paths:` filters above now matching FOUR independent packages, any
+  # change to any one of them fires the whole workflow — which, without this
+  # gate, meant a platform-sdk-only change would also spin up
+  # catalog-service's Postgres service container and run full Docker builds
+  # for BOTH catalog-service and gateway (and, on a push to dev/test/main,
+  # actually PUSH redundant images to GHCR under unchanged tags) despite
+  # neither having changed at all. This job computes which package(s)
+  # actually changed once, so `test`/`build-and-push`, `test-gateway`/
+  # `build-and-push-gateway`, and `test-platform-packages` below can each
+  # skip themselves when their own package didn't change — real cost/
+  # correctness fix, not just tidiness (an unnecessary GHCR push isn't
+  # dangerous, but it's not nothing either).
+  changes:
+    name: Detect which package(s) changed
+    runs-on: ubuntu-latest
+    outputs:
+      catalog_service: ${{ steps.filter.outputs.catalog_service }}
+      gateway: ${{ steps.filter.outputs.gateway }}
+      platform_packages: ${{ steps.filter.outputs.platform_packages }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            catalog_service:
+              - 'src/core/catalog-service/**'
+              - '.github/workflows/ci.yml'
+            gateway:
+              - 'src/core/gateway/**'
+              - '.github/workflows/ci.yml'
+            platform_packages:
+              - 'src/platform-sdk/**'
+              - 'src/platform-cli/**'
+              - '.github/workflows/ci.yml'
+
+  test:
+    name: Test catalog-service
+    needs: changes
+    if: needs.changes.outputs.catalog_service == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/core/catalog-service
+    services:
+      # Real Postgres, not sqlite — tests/conftest.py runs the actual
+      # Alembic migrations against it and needs the enum types those
+      # migrations create (see models.py's create_type=False comment).
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: catalog_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: python -m pytest -v
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/catalog_test
+
+  build-and-push:
+    name: Build & push image
+    needs: [changes, test]
+    # Redundant with the fact that a skipped `test` already cascades to
+    # skip anything that `needs` it (GitHub Actions' default `if:
+    # success()` treats a skipped dependency as not-success) — written out
+    # explicitly anyway, same "explicit over implicit" preference as the
+    # rest of this repo's comments, so this job's own condition is legible
+    # without having to know that cascade rule.
+    if: needs.changes.outputs.catalog_service == 'true'
+    runs-on: ubuntu-latest
+    # Least-privilege: only this job ever touches GHCR, so only this job
+    # gets packages: write — `test` above inherits the workflow-level
+    # contents: read and nothing more.
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # Hardcoded lowercase — ${{ github.repository_owner }} would resolve
+      # to "DougallPercival" (this repo's real GitHub casing, see every
+      # repoURL: elsewhere in src/core/argocd/), and GHCR/OCI image
+      # references MUST be all-lowercase or the push is rejected outright.
+      # Same "hardcoded, not derived — see the comment for where a fork
+      # personalizes it" pattern as repoURL/targetRevision in every self-
+      # referencing Argo CD Application (src/core/argocd/README.md) — if
+      # you fork this repo and want your own images, this is the other
+      # value you change, alongside repoURL.
+      IMAGE_NAME: ghcr.io/dougallpercival/catalog-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Build-only on PRs (proves the Dockerfile still builds cleanly) —
+      # never push from a PR, and never even attempt to log in for one:
+      # a PR from a fork only gets a read-only GITHUB_TOKEN regardless, so
+      # this "if" is belt-and-suspenders on top of a restriction GitHub
+      # already enforces, not the only thing preventing it.
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: src/core/catalog-service
+          push: ${{ github.event_name == 'push' }}
+          # Tag = the branch name, matching ARCHITECTURE.md §10 / CONTRIBUTING.md's
+          # dev -> test -> main promotion model: :dev always means "whatever
+          # dev currently is", same as Argo CD's targetRevision already
+          # pointing at a branch rather than a pinned commit. A Deployment
+          # that wants a specific promoted version points at :test or :main
+          # instead — see manifests/catalog-service.yaml's own tag choice.
+          #
+          # NOT simply github.ref_name on both event types, though — that's
+          # what this line originally was, and it broke the very first real
+          # pull_request run: for a pull_request event, github.ref_name is
+          # "<pr-number>/merge" (the ref is refs/pull/<n>/merge), and a "/"
+          # inside the tag component is an invalid Docker reference —
+          # buildx fails with "invalid reference format" even though push
+          # (above) is already false, because buildx still validates --tag
+          # up front for a build-only run, before it ever gets to the point
+          # of deciding not to push it. The tag's actual value never matters
+          # on a PR build (nothing is pushed), so branch on event_name: push
+          # events keep the meaningful branch-name tag, pull_request events
+          # get a PR-numbered one instead — valid, and still useful for
+          # correlating a failed build with its PR if you're staring at the
+          # Actions cache. Caught 2026-09-01 via a real PR run (the
+          # feature/workspace-roles -> dev PR), not by local simulation —
+          # nothing before this had ever exercised the pull_request trigger
+          # for real.
+          tags: >-
+            ${{ github.event_name == 'push'
+            && format('{0}:{1}', env.IMAGE_NAME, github.ref_name)
+            || format('{0}:pr-{1}', env.IMAGE_NAME, github.event.pull_request.number) }}
+          # Links the image to this repo (Settings -> Packages shows
+          # "opendataplatform" as its source) so GHCR can inherit access
+          # permissions from the repo. Does NOT make the package public by
+          # itself — see docs/known-issues.md's "GHCR package defaults to
+          # private on first publish" entry for the one manual step still
+          # needed after this workflow's first successful run.
+          labels: |
+            org.opencontainers.image.source=https://github.com/DougallPercival/opendataplatform
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test-gateway:
+    name: Test gateway
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/core/gateway
+    # No `services: postgres` here, same reasoning as test-platform-packages
+    # below — gateway is stateless (see its own README: no live
+    # Keycloak/catalog-service needed either, everything's respx-mocked at
+    # the HTTP transport level, JWTs are signed with a throwaway in-test RSA
+    # keypair). A Postgres service container here would be pure dead weight.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: python -m pytest -v
+
+  build-and-push-gateway:
+    name: Build & push gateway image
+    needs: [changes, test-gateway]
+    # Same "written out explicitly, even though it's redundant with the
+    # skipped-dependency cascade" reasoning as build-and-push's own
+    # identical comment above.
+    if: needs.changes.outputs.gateway == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # Same hardcoded-lowercase reasoning as build-and-push's IMAGE_NAME
+      # above — see that job's own comment.
+      IMAGE_NAME: ghcr.io/dougallpercival/gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: src/core/gateway
+          push: ${{ github.event_name == 'push' }}
+          # Identical ternary to build-and-push's own `tags:` above, copied
+          # verbatim rather than re-derived — that job's own long comment
+          # explains exactly why a bare `github.ref_name` breaks on a
+          # pull_request event ("<pr>/merge" isn't a valid Docker tag
+          # component) and isn't repeated here to avoid the two copies
+          # drifting apart; this is the same bug, already fixed once, reused
+          # rather than risking reintroducing it.
+          tags: >-
+            ${{ github.event_name == 'push'
+            && format('{0}:{1}', env.IMAGE_NAME, github.ref_name)
+            || format('{0}:pr-{1}', env.IMAGE_NAME, github.event.pull_request.number) }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/DougallPercival/opendataplatform
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test-platform-packages:
+    name: Test platform-sdk + platform-cli
+    needs: changes
+    if: needs.changes.outputs.platform_packages == 'true'
+    runs-on: ubuntu-latest
+    # No `services: postgres` here, unlike `test` above — deliberately.
+    # Both packages' own tests are mocked at their own boundary (respx for
+    # platform-sdk's HTTP calls, Typer's CliRunner with PlatformClient
+    # monkeypatched for platform-cli) rather than run against a live
+    # catalog-service — see each package's own README for why. A shared job
+    # with catalog-service's `test` would either drag an unneeded Postgres
+    # container into every platform-sdk/platform-cli-only run or force an
+    # awkward conditional service block; two jobs cleanly matches two
+    # actually-different dependency shapes.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # platform-cli depends on platform-sdk by name with no version pin
+      # (see platform-cli/pyproject.toml — no published package to resolve
+      # against, just a sibling in this monorepo), so it has to install
+      # after platform-sdk is already present for pip's resolver to satisfy
+      # it with — same two-step order both packages' READMEs document for
+      # local dev, reproduced here rather than diverging from it.
+      - name: Install platform-sdk (editable, with dev extras)
+        working-directory: src/platform-sdk
+        run: pip install -e ".[dev]"
+      - name: Install platform-cli (editable, with dev extras)
+        working-directory: src/platform-cli
+        run: pip install -e ".[dev]"
+      - name: Lint + test platform-sdk
+        working-directory: src/platform-sdk
+        run: |
+          ruff check .
+          python -m pytest -v
+      - name: Lint + test platform-cli
+        working-directory: src/platform-cli
+        run: |
+          ruff check .
+          python -m pytest -v

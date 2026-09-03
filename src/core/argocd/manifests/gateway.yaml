@@ -1,0 +1,179 @@
+# platform-gateway — verifies Keycloak JWTs, proxies to catalog-service with
+# gateway-derived X-Workspace/X-User/X-Role headers. See ../../gateway/README.md
+# for what's built vs. still deferred — this is NOT yet the full
+# ARCHITECTURE.md §3 gateway (no nav aggregation, Add-ons page API, or
+# module registry; those need ui-shell/a second module to exist first).
+#
+# Image: ghcr.io/dougallpercival/gateway:dev — hardcoded, not templated,
+# same "self-referencing apps" convention as catalog-service.yaml (see that
+# file's own comment, and argocd/README.md's "Self-referencing apps"
+# section) — fork this repo and modify gateway's code, point this at your
+# own build instead. imagePullPolicy: Always for the same reason
+# catalog-service.yaml gives: :dev is a moving tag, not an immutable version.
+#
+# TLS to Keycloak: mounts ONLY the `ca.crt` key of platform-ca-secret
+# (Reflector-mirrors into this namespace via cluster-issuer.yaml's
+# secretTemplate annotations, 2026-09-02) — deliberately NOT the whole
+# Secret, which also carries tls.key: platform-ca-secret's private key is
+# what cert-manager uses to sign every certificate this cluster issues, and
+# gateway has no reason to ever hold it. `items:` below is what limits the
+# mount to just the one file gateway actually needs. keycloak-tls's
+# Certificate (keycloak-instance.yaml) got the matching SAN addition, same
+# date, so gateway can verify Keycloak's cert when connecting directly to
+# its in-cluster Service DNS name — no port-forward, unlike the CLI-side
+# Keycloak tooling (see platform_sdk/_keycloak_connection.py's docstring for
+# why that trick is CLI-only, never reused here).
+#
+# Ingress: added 2026-09-02 (platform-ingress branch, see the bottom of this
+# file) — gateway.platform.local now replaces the manual
+# `kubectl port-forward -n gateway svc/gateway 8080:8080` that used to be the
+# only way to reach gateway from off-cluster; `platform_sdk`'s gateway_url
+# default follows suit (see platform_sdk/config.py). Default ServiceAccount,
+# no RBAC — this pass never touches the Kubernetes API or Argo CD's API
+# (that's the still-deferred Add-ons-page/module-registry scope the README
+# describes).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: ghcr.io/dougallpercival/gateway:dev
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GATEWAY_KEYCLOAK_INTERNAL_URL
+              value: https://platform-service.keycloak.svc.cluster.local:8443
+            - name: GATEWAY_KEYCLOAK_PUBLIC_URL
+              # No port (2026-09-02, platform-ingress branch) — this used to
+              # carry an interim ":18444" suffix matching
+              # keycloak-instance.yaml's now-removed hostname-port pin (see
+              # that file's additionalOptions comment for the full "why" of
+              # the port that used to be here). Now that a real Ingress
+              # fronts Keycloak on the standard 443 port with
+              # proxy-headers: xforwarded telling it to generate port-free
+              # URLs, this has to match that: gateway's own issuer check
+              # (expected_issuer) compares this value's host+path against
+              # every token's `iss` claim verbatim, so a mismatched port (or
+              # a missing one, if Keycloak were still reflecting 8443) fails
+              # every request with "Invalid issuer" — confirm live the first
+              # time this deploys behind the real Ingress.
+              value: https://keycloak.platform.local
+            - name: GATEWAY_KEYCLOAK_REALM
+              value: platform
+            - name: GATEWAY_KEYCLOAK_CA_PATH
+              value: /etc/gateway/keycloak-ca/ca.crt
+            - name: GATEWAY_CATALOG_SERVICE_URL
+              value: http://catalog-service.catalog-service.svc.cluster.local:8000
+          volumeMounts:
+            - name: keycloak-ca
+              mountPath: /etc/gateway/keycloak-ca
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            # Homelab-scale placeholders, not measured — same disclaimer as
+            # catalog-service.yaml's own resources block; adjust once real
+            # usage is known.
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: keycloak-ca
+          secret:
+            secretName: platform-ca-secret
+            items:
+              - key: ca.crt
+                path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: gateway
+spec:
+  selector:
+    app: gateway
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# gateway's own Ingress-facing cert (2026-09-02, platform-ingress branch) —
+# unlike keycloak-instance.yaml's Ingress, which reuses keycloak-tls
+# (already covers keycloak.platform.local, already lives in the right
+# namespace), gateway has never had a Certificate of its own: its Service
+# has never spoken TLS, only plain HTTP inside the cluster. Off the same
+# platform-ca ClusterIssuer as every other cert in this repo, so it's
+# trusted the same way once platform-ca is imported (see
+# manifests/cluster-issuer.yaml).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gateway-ingress-tls
+  namespace: gateway
+spec:
+  secretName: gateway-ingress-tls
+  dnsNames:
+    - gateway.platform.local
+  issuerRef:
+    name: platform-ca
+    kind: ClusterIssuer
+---
+# The Ingress itself — what actually makes gateway.platform.local reachable
+# off-cluster, replacing the manual port-forward this file's own top
+# comment used to describe. No backend-protocol annotation needed (unlike
+# keycloak-instance.yaml's Ingress): gateway's Service has only ever spoken
+# plain HTTP, an in-cluster-only hop at the same trust level as gateway's
+# own connection to catalog-service — nginx's default HTTP backend is
+# exactly right here. Shares ingress-nginx's one controller/LoadBalancer IP
+# with keycloak-instance.yaml's Ingress via a second host rule, not a
+# second front door — see that Ingress's own comment for why this has to be
+# a separate object rather than one Ingress spanning both hostnames
+# (namespace-scoped backend Service rule).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+  namespace: gateway
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - gateway.platform.local
+      secretName: gateway-ingress-tls
+  rules:
+    - host: gateway.platform.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 8080
