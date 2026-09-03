@@ -26,7 +26,10 @@ gateway_url docstring for the same rename applied to its env var).
 Constructing a PlatformClient here does NOT require being logged in — the
 credentials check is lazy, on the first actual request a command makes (see
 client.py's `_ensure_token`) — so `platform login` itself, and `--help`,
-both work with no credentials on disk yet.
+both work with no credentials on disk yet. `module.py`'s commands
+(platform-module-lifecycle branch, 2026-09-03) never touch `ctx.obj` at
+all — they don't talk to gateway, so the lazy PlatformClient built here
+is simply unused for them, same as it is for `--help`.
 """
 from __future__ import annotations
 
@@ -37,6 +40,7 @@ from platform_cli.dataset import app as dataset_app
 from platform_cli.errors import handle_api_errors
 from platform_cli.function import app as function_app
 from platform_cli.login import login as login_command
+from platform_cli.module import app as module_app
 from platform_cli.workspace import app as workspace_app
 
 app = typer.Typer(
@@ -48,6 +52,7 @@ app = typer.Typer(
 app.add_typer(workspace_app, name="workspace", help="Manage workspaces.")
 app.add_typer(dataset_app, name="dataset", help="Manage datasets.")
 app.add_typer(function_app, name="function", help="Manage functions.")
+app.add_typer(module_app, name="module", help="Manage modules.")
 app.command("login", help="Log in via your browser (OAuth device flow).")(login_command)
 
 

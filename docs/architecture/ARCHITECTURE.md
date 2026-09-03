@@ -100,7 +100,19 @@ This is the one part that's still genuinely hands-on, and should be: `platform-c
 
 Testing this on a cluster you intend to destroy afterward — a cloud VM set spun up just to validate a release, or a box you want back to bare metal — needs the exact inverse of every install path, not just "delete the manifests and hope":
 
-- `platform module uninstall <name>` is the CLI mirror of install: removes the manifest from `modules-enabled/`, Argo CD prunes the release. By default this leaves the module's PersistentVolumeClaims in place, so reinstalling the same module gets its data back — pass `--purge-data` to also drop its PVCs and the workspace bucket prefixes/schemas it owned. The Add-ons page offers the same two actions, not one: Remove, and Remove & delete data — the second asks you to type the module's name to confirm, because there's no undo. **Not built yet** (confirmed 2026-09-03, `platform-function-promote` branch) — see `docs/architecture/module-lifecycle-plan.md` for the actual dependency-ordered build plan, since install/uninstall need the whole `modules-enabled/`-reconciliation mechanism to exist first.
+- `platform module install <name>` / `platform module uninstall <name>` are real as of the
+  `platform-module-lifecycle` branch (2026-09-03): `install` writes a generated Argo CD
+  `Application` manifest into `modules-enabled/`, commits, and pushes; `uninstall` removes it the
+  same way, and Argo CD (via `modules-root`, `src/core/argocd/apps/core/modules-root.yaml`) prunes
+  the release. By default this leaves the module's PersistentVolumeClaims in place (an
+  `argocd.argoproj.io/sync-options: Delete=false` annotation each module's chart sets, not special
+  CLI logic), so reinstalling the same module gets its data back — pass `--purge-data` and the CLI
+  prints the `kubectl delete pvc` command to also drop its PVCs yourself (it doesn't run this for
+  you — no cluster credentials, no undo). Bucket/schema ownership for `--purge-data` is **still
+  not built** — PVCs only this pass; see `docs/architecture/module-lifecycle-plan.md`. The Add-ons
+  page's own "Remove & delete data" button, and dependency-checking on `requires: [...]`, are also
+  **not built yet** — both need gateway's module-registry endpoint (`module-lifecycle-plan.md`
+  items 6-7), a separate, later branch from the one that built install/uninstall themselves.
 - `bootstrap/teardown.sh` is the mirror of `install.sh`: uninstalls every module in `modules-enabled/` (with data purged, since the goal is a clean slate), removes core, removes Argo CD, then runs k3s's own `k3s-uninstall.sh` — so the machine ends up exactly where it was before `install.sh` ever ran, whether that machine is a spare box at home or a cloud VM. What it deliberately doesn't touch is the compute itself: on hardware you own, that's a machine you still have; on a cloud VM, actually reclaiming cost means terminating the instance, which is one layer above this script.
 - For cloud test clusters specifically, it's worth provisioning them through a minimal Terraform (or equivalent) module that spins the VMs up *and* tears them down — pairing `terraform apply` with `bootstrap/install.sh`, and `terraform destroy` as the last step regardless of whether `teardown.sh` ran first. A full test cycle then costs exactly as long as the test took, and nothing lingers to show up on a bill.
 

@@ -22,7 +22,13 @@ design decisions ARCHITECTURE.md §3 already made (the three-doors model, `modul
 `modules-enabled/`, the `module.yaml` shape); it names which section covers each piece and focuses
 on build order and what's genuinely still open.
 
-**Status: not implemented.** Nothing in this document has been built as of 2026-09-03.
+**Status (updated 2026-09-03, platform-module-lifecycle branch): the "Recommended first slice"
+below — items 1-5 — is now built.** `src/core/argocd/apps/core/modules-root.yaml`,
+`src/platform-cli/platform_cli/{manifest,repo,module}.py`, `src/charts/_template/` +
+`src/charts/hello-module/`, and `src/modules/hello-module/module.yaml` are all real, not
+placeholders — see each item below for exactly where. Items 6-7 remain open, unchanged from the
+original plan. The rest of this document is left as originally written (including "What already
+exists," now historical) except where a status note marks something as resolved.
 
 ## What already exists
 
@@ -38,40 +44,40 @@ on build order and what's genuinely still open.
 
 Each item names the ARCHITECTURE.md section that already specifies its design, where one exists.
 
-1. **An Argo CD `Application` watching `modules-enabled/`.** The actual reconciliation engine every
-   door in §3 ultimately depends on — until this exists, writing a manifest into
-   `modules-enabled/` does nothing. Likely the same directory-watching app-of-apps shape
-   `src/core/argocd/root-app.yaml` and `apps/optional/*-app.yaml` already use (see
-   `src/core/argocd/README.md`'s "Portability" section for that pattern), pointed at
-   `modules-enabled/` instead of `apps/core/` or `apps/optional/<capability>/`. Foundational — every
-   later item in this list assumes this is live.
+1. **An Argo CD `Application` watching `modules-enabled/`.** ✅ **Built** —
+   `src/core/argocd/apps/core/modules-root.yaml`, wave 5. Exactly the app-of-apps shape predicted
+   here: same mechanism `root-app.yaml` uses one level up, `directory.recurse: false`, pointed at
+   `src/modules-enabled/` instead of `apps/core/`. Each file it finds there is itself a complete
+   Argo CD `Application` (see item 4's manifest.py note), not a lightweight pointer.
 
 2. **`module.yaml` schema + validation**, per §3's own `notebook-jupyterhub` example: `id`,
-   `displayName`, `icon`, `navPath`, `proxyTo`, `healthCheck`, `requires`, `optional`. Needs a real
-   validation step somewhere in the install path (reject a malformed `module.yaml` before Argo CD
-   ever tries to reconcile whatever it points at) — not specified in §3 beyond the field shape
-   itself, so this is genuinely new design work, not just "read what §3 already says."
+   `displayName`, `icon`, `navPath`, `proxyTo`, `healthCheck`, `requires`, `optional`. ✅ **Built** —
+   `src/platform-cli/platform_cli/manifest.py`'s `ModuleManifest` (Pydantic, `extra="forbid"`),
+   plus one additive field, `namespace` (defaults to `id`) — resolves the "open questions" section's
+   validation-failure-mode question below.
 
 3. **The chart-wrapper layer §7 references** — `module.yaml`'s placement hint (`platform.io/role:
    control|storage|compute`) turned into a real `nodeSelector`/`tolerations` block on whatever the
-   module's chart deploys. Needed before any real module's Helm release reconciles onto the right
-   node class; §7 describes the *intent* ("a module's `module.yaml` carries an optional placement
-   hint that the chart wrapper turns into the actual `nodeSelector`/`tolerations` block") but not the
-   wrapper's actual mechanism (a Helm library chart? a post-render step? a small piece of Go/Python
-   templating?) — that choice still needs making here.
+   module's chart deploys. ✅ **Built** — resolved as a Helm-template convention, not a separate
+   wrapper tool: every chart scaffolded from `src/charts/_template/` gets `templates/_helpers.tpl`'s
+   `platform.nodeSelector`/`platform.tolerations` named templates for free, and
+   `platform module install` computes the actual `placement` values from `module.yaml` and writes
+   them into the generated Application's `spec.source.helm.values` block
+   (`manifest.py`'s `render_application_manifest`). No separate values file, no post-render step.
 
-4. **`platform-cli module install <name>` / `module uninstall <name> [--purge-data]`.** The CLI
-   door. Per §3's "Tearing it all down" subsection: `install` writes the module's manifest into
-   `modules-enabled/`; `uninstall` removes it and lets Argo CD prune. `--purge-data` additionally
-   drops the module's PersistentVolumeClaims *and* "the workspace bucket prefixes/schemas it
-   owned" — that second half needs a real, enforced convention for what a module's owned
-   data actually is (which SeaweedFS bucket prefixes, which Postgres schemas) *before* `--purge-data`
-   can safely automate deleting it; today nothing declares that ownership anywhere machine-readable.
-   Worth its own design pass, not assumed here.
+4. **`platform-cli module install <name>` / `module uninstall <name> [--purge-data]`.** ✅ **Built**
+   — `src/platform-cli/platform_cli/module.py`. `install` validates + renders + writes
+   `modules-enabled/<id>.yaml` + commits + pushes (via `repo.py`'s git helpers); `uninstall` mirrors
+   it for removal. The PVC-ownership question below is resolved for v1: PVCs only (bucket/schema
+   ownership stays open, see below), via a label + `Delete=false` annotation convention
+   (`src/charts/hello-module/templates/pvc.yaml`), and `--purge-data` prints the `kubectl delete
+   pvc` command rather than running it — platform-cli has no cluster credentials for anything
+   beyond git, by design.
 
-5. **`platform-cli module scaffold <name>`.** Generates `modules/<name>/` (chart + `module.yaml`)
-   from `_template/`, per §3's "Building a new module" subsection. The most self-contained item on
-   this list — doesn't depend on 1-4 being live, only on `_template/` (which already exists).
+5. **`platform-cli module scaffold <name>`.** ✅ **Built** — same file, `module.py`'s `scaffold`
+   command. Generates both `modules/<name>/module.yaml` and `charts/<name>/` from their respective
+   `_template/` directories; deliberately doesn't commit (see `module.py`'s own docstring for why
+   that's different from install/uninstall).
 
 6. **Dependency checking (`requires: [...]`) "at the API layer both doors call through"** (§3's own
    phrasing — "the dependency check lives once, at the API layer both doors call through," referring
@@ -101,6 +107,13 @@ install/uninstall/scaffold`, and a first real end-to-end live verification — i
 CLI, confirm Argo CD reconciles it, uninstall it, confirm it's gone, confirm `--purge-data` actually
 drops what it claims to.
 
+**Done (2026-09-03):** all of the above is built, against `src/modules/hello-module/` — stock
+nginx, `placement: {role: compute}`, one throwaway PVC — per items 1-5's ✅ markers above. Live
+verification (install → Argo reconciles → placement lands on the compute node → uninstall leaves
+the PVC → `--purge-data` prints the removal command) is tracked separately as this branch's own
+live-verification pass, not re-described here — see the branch's own plan file / commit history for
+that record rather than duplicating it in this doc.
+
 **Items 6-7 explicitly deferred to their own later branch** — the dependency-check endpoint, the
 module registry, the Add-ons page, and `ui-shell` are a substantial, separable piece of work in their
 own right (arguably the harder half, since `ui-shell` doesn't exist at all), and nothing in items 1-5
@@ -110,13 +123,25 @@ large branch.
 
 ## Open questions this doc deliberately doesn't resolve
 
-- The chart-wrapper mechanism (item 3) — needs a real design decision, not just "per §7."
-- The machine-readable "what does this module own" convention `--purge-data` needs (item 4) — could
-  be a field on `module.yaml` itself (e.g. `ownedBuckets`/`ownedSchemas`), or something the module's
-  own chart declares; not decided here.
-- `module.yaml` validation's exact failure mode (item 2) — reject at `scaffold`-time, at
-  `install`-time, or let Argo CD's own sync just go Degraded on a bad manifest?
+Resolved by the platform-module-lifecycle branch (2026-09-03) — kept here, marked, rather than
+deleted, so the reasoning stays visible next to the question it answers:
 
-These are exactly the kind of decisions this session's branch-plans usually settle as "Key design
-decisions" before implementation starts — left open here on purpose, since settling them without
-being about to actually build the thing risks guessing wrong and having to revisit anyway.
+- ~~The chart-wrapper mechanism (item 3)~~ — **resolved**: a Helm-template convention
+  (`_helpers.tpl`'s named templates) plus values computed by `platform module install` and passed
+  through the generated Application's `spec.source.helm.values`. See item 3 above.
+- ~~The machine-readable "what does this module own" convention `--purge-data` needs (item 4)~~ —
+  **resolved for v1, PVC-only**: a `platform.io/module: <id>` label plus an
+  `argocd.argoproj.io/sync-options: Delete=false` annotation on every PVC a module's chart creates
+  (`src/charts/hello-module/templates/pvc.yaml`). Bucket/schema ownership is **still open** —
+  deliberately out of scope for this slice, same "PVCs only this pass" scoping the branch that
+  built this settled on.
+- ~~`module.yaml` validation's exact failure mode (item 2)~~ — **resolved**: rejected at both
+  `scaffold`-time (a bad module *name*, not module.yaml content, since scaffold generates the file)
+  and `install`-time (a bad module.yaml, including unknown fields — `ModuleManifest`'s
+  `extra="forbid"`) — never silently, and never left for Argo CD to discover as a Degraded sync.
+
+Still open, unresolved by this branch — items 6-7's own scope, not this slice's:
+
+- Dependency checking (`requires: [...]`) enforcement — item 6, needs a gateway endpoint.
+- The bucket/schema half of `--purge-data`'s data-ownership convention (see above).
+- Everything in items 6-7: gateway's module registry, the Add-ons page, `ui-shell`.

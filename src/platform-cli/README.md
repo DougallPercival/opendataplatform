@@ -24,9 +24,9 @@ platform dataset delete DATASET_ID
 
 Not built yet: commands for the other three catalog-service resource types (pipelines, models,
 lineage) — same "add it when platform-cli actually needs it" reasoning as everywhere else in this
-repo. `platform module scaffold/install` from ARCHITECTURE.md §3/§7 is unrelated future scope
-(module lifecycle, not catalog data) — not part of this package's current slice either; see
-`docs/architecture/module-lifecycle-plan.md` for how that's actually scoped to get built.
+repo. `platform module scaffold/install/uninstall` (ARCHITECTURE.md §3/§7) is a separate, unrelated
+slice — module lifecycle, not catalog data — see "Module lifecycle" below; it's built now, not
+future scope.
 
 ## Functions: publish + promote (2026-09-03, platform-function-promote branch)
 
@@ -47,6 +47,42 @@ platform function promote FUNCTION_ID
 the endpoint always sets visibility to `public` (one-directional by design); demoting back is
 `function update FUNCTION_ID --visibility workspace`, the same generic `update` command every other
 resource here already has.
+
+## Module lifecycle: install/uninstall/scaffold (2026-09-03, platform-module-lifecycle branch)
+
+```text
+platform module scaffold NAME
+platform module install NAME [--dry-run]
+platform module uninstall NAME [--purge-data] [--dry-run]
+```
+
+Genuinely different from every other command in this file: these three don't talk to
+`platform-gateway` at all — no login needed, no `PLATFORM_GATEWAY_URL`. They read/write files in
+whatever git checkout the CLI is invoked from and commit + push directly, per
+docs/architecture/module-lifecycle-plan.md's "Recommended first slice" (items 1-5 — the Argo CD
+reconciliation mechanism, `module.yaml` schema/validation, and the chart-wrapper node-placement
+convention all live in `platform_cli/manifest.py`, `platform_cli/repo.py`, and
+`../core/argocd/apps/core/modules-root.yaml`, not in this package alone).
+
+- `scaffold NAME` generates `../modules/NAME/module.yaml` and `../charts/NAME/` from
+  `_template/` — writes files only, commits nothing. Edit the chart, then commit it yourself
+  (`git add` + `git commit`) before running `install` — `install` refuses to run against a dirty
+  working tree, so the scaffolded chart has to actually be committed first, same as any other
+  change you'd make by hand.
+- `install NAME` validates `module.yaml`, renders a complete Argo CD `Application` manifest (repo
+  URL discovered live via `git remote get-url origin`; placement wired from `module.yaml`'s own
+  `placement` block), writes it to `../modules-enabled/NAME.yaml`, and commits + pushes it — from
+  there, `modules-root` picks it up and Argo CD reconciles the module in. `--dry-run` prints the
+  generated manifest and stops before writing or committing anything.
+- `uninstall NAME` removes that file and commits + pushes the removal — Argo CD prunes the
+  Deployment/Service, but leaves any PersistentVolumeClaim the chart marked
+  `argocd.argoproj.io/sync-options: Delete=false` alone (ARCHITECTURE.md §3's documented default:
+  reinstalling gets your data back). `--purge-data` additionally prints the `kubectl delete pvc`
+  command to run yourself — platform-cli never runs it for you; it has no cluster credentials for
+  anything beyond git, and PVC deletion has no undo.
+
+Dependency-checking on `requires: [...]` and the Add-ons page/gateway module registry (items 6-7)
+are explicitly **not** part of this slice — see `docs/architecture/module-lifecycle-plan.md`.
 
 ## Real auth: `platform login` (2026-09-02, platform-gateway-auth branch)
 
@@ -123,6 +159,15 @@ first, every time, or `platform: command not found` even though it's installed. 
 after switching terminals/reconnecting SSH; if `platform` isn't found and you're sure it's
 installed, this is almost always why.
 
+**New as of `platform module install/uninstall/scaffold` (2026-09-03):** these need a real git
+checkout with push access to `origin` on whatever branch is checked out — the first commands in
+this package that touch git at all (every other command only ever needed HTTP + saved
+credentials). `helm` is checked for but not required: if it's on `PATH`, `install` runs
+`helm template` against the chart before committing, as a pre-push safety check; if it isn't,
+`install` prints one warning and skips the check rather than failing. Whether `helm` is actually
+on `homelab-dev` hasn't been confirmed as of this branch — check with `which helm` before relying
+on the safety check being active there.
+
 ## Local dev setup
 
 Two editable installs, in this order — `platform-cli` depends on `platform-sdk` by name with no
@@ -178,3 +223,13 @@ network) — verifying the verification-URL/code output, the success/failure pat
 that `--user`/`--role`/`--catalog-url` now fail with Typer's own "no such option" rather than being
 silently accepted and ignored (`test_removed_flags_are_rejected_not_silently_ignored`) — the actual
 proof that this branch's breaking change took effect, not just that the new command works.
+
+`tests/test_module.py` (2026-09-03) is different from every other test file here on purpose: it
+uses real temporary git repos (a bare "origin" plus a working clone, both `subprocess`-driven, set
+up fresh per test) rather than mocking git calls — the same "exercise the real thing" preference
+this repo applies elsewhere (catalog-service's migration tests run real Alembic against a real
+Postgres). `install`/`uninstall`'s commits are asserted by actually diffing local `HEAD` against
+`origin/main` after the push, not by trusting the CLI's own exit code. The one thing genuinely
+mocked is `helm` itself (`shutil.which`/`subprocess.run`, both monkeypatched) — this sandbox has no
+`helm` binary to run for real, so both the "helm absent" and "helm present" paths are exercised
+explicitly rather than only ever hitting whichever one happens to match a given machine.
