@@ -1,0 +1,33 @@
+# Added 2026-09-03 — discovered missing entirely during the platform-module-lifecycle branch's
+# live verification: `platform module install`'s new require_clean_worktree guard (repo.py — the
+# first platform-cli command that refuses to run against ANY uncommitted change, including
+# untracked files, not just modified ones) tripped on __pycache__ directories left over from
+# `pip install`/`pytest` runs, which had nowhere to be ignored because this repo never had a root
+# .gitignore at all. Confirmed via `git ls-files | grep -E "__pycache__|\.pytest_cache|..."` that
+# nothing junky was ever actually committed — this is purely "add the missing file," not a cleanup
+# of already-tracked cruft (a .gitignore can't retroactively un-track something already committed
+# anyway; `git rm --cached` would be the tool for that, not needed here).
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets / local config — never commit these
+*.env
+.env.*
+bootstrap/.env
+kubeconfig*
+*.kubeconfig
+sealed-secrets-private-key.yaml
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+
+# Helm
+charts/**/charts/
+charts/**/*.tgz
