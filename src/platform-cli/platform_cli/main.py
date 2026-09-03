@@ -26,10 +26,14 @@ gateway_url docstring for the same rename applied to its env var).
 Constructing a PlatformClient here does NOT require being logged in — the
 credentials check is lazy, on the first actual request a command makes (see
 client.py's `_ensure_token`) — so `platform login` itself, and `--help`,
-both work with no credentials on disk yet. `module.py`'s commands
-(platform-module-lifecycle branch, 2026-09-03) never touch `ctx.obj` at
-all — they don't talk to gateway, so the lazy PlatformClient built here
-is simply unused for them, same as it is for `--help`.
+both work with no credentials on disk yet. `module.py`'s `uninstall`/
+`scaffold` never touch `ctx.obj` at all — they don't talk to gateway, so
+the lazy PlatformClient built here is simply unused for them, same as it is
+for `--help`. `install` is the one exception (module-lifecycle-plan.md item
+6, platform-module-deps branch, 2026-09-03): it reuses this same client to
+call gateway's GET /modules/check-requirements, but ONLY when the module
+being installed declares a non-empty `requires: [...]` — see module.py's
+own module docstring and `_check_requires` for the full behavior.
 """
 from __future__ import annotations
 

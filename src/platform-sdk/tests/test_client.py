@@ -469,3 +469,41 @@ def test_http_gateway_url_never_touches_kubectl_even_on_first_use(monkeypatch):
     c = PlatformClient(gateway_url=BASE_URL)
     c._ensure_http()  # the actual lazy build — still must not touch kubectl
     c.close()
+
+
+@respx.mock
+def test_check_module_requirements(client):
+    # platform-module-deps branch (2026-09-03) — mirrors gateway's own
+    # GET /modules/check-requirements response shape exactly (see
+    # ModuleRequirementStatus's docstring).
+    route = respx.get(f"{BASE_URL}/modules/check-requirements").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"module_id": "hello-module", "satisfied": True, "status": "Healthy"},
+                    {"module_id": "other-module", "satisfied": False, "status": "not installed"},
+                ]
+            },
+        )
+    )
+
+    results = client.check_module_requirements(["hello-module", "other-module"])
+
+    assert len(results) == 2
+    assert results[0].module_id == "hello-module"
+    assert results[0].satisfied is True
+    assert results[1].satisfied is False
+    assert results[1].status == "not installed"
+    # sent as repeated ?requires=... query params, not a single delimited string
+    sent_params = route.calls.last.request.url.params.get_list("requires")
+    assert sent_params == ["hello-module", "other-module"]
+
+
+@respx.mock
+def test_check_module_requirements_with_no_requirements_returns_empty_list(client):
+    respx.get(f"{BASE_URL}/modules/check-requirements").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+
+    assert client.check_module_requirements([]) == []

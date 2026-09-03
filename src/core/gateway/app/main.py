@@ -20,6 +20,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.jwks import JWKSCache
+from app.modules import router as modules_router
 from app.proxy import router as proxy_router
 
 
@@ -73,8 +74,11 @@ def healthz():
     return {"status": "ok"}
 
 
-# Registered LAST, after /healthz above — the catch-all route below matches
-# `/{path:path}`, which would swallow /healthz (and any other route added
-# after it) if it came first. See proxy.py's own module docstring for the
-# same point.
+# modules_router (app/modules.py, platform-module-deps branch) has to be
+# registered before proxy_router for the same reason /healthz is above it —
+# proxy_router's `/{path:path}` catch-all would otherwise swallow
+# /modules/check-requirements too. proxy_router stays LAST, after
+# everything else, for that same reason. See proxy.py's own module
+# docstring for the same point.
+app.include_router(modules_router)
 app.include_router(proxy_router)

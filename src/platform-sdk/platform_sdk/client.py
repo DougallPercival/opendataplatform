@@ -78,7 +78,16 @@ from platform_sdk.config import SDKSettings
 from platform_sdk.credentials import load_credentials, save_credentials
 from platform_sdk.exceptions import NotAuthenticatedError, PlatformAPIError
 from platform_sdk.keycloak_login import KeycloakLoginFlow
-from platform_sdk.models import Dataset, Function, FunctionVersion, Principal, TokenSet, Visibility, Workspace
+from platform_sdk.models import (
+    Dataset,
+    Function,
+    FunctionVersion,
+    ModuleRequirementStatus,
+    Principal,
+    TokenSet,
+    Visibility,
+    Workspace,
+)
 
 # How close to actual expiry counts as "near-expiry" and triggers a silent
 # refresh before the request goes out, rather than sending a token that's
@@ -313,3 +322,14 @@ class PlatformClient:
         # unconditional (sets visibility=public, one-directional by design;
         # demoting back is a plain update_function(..., visibility=...)).
         return Function.model_validate(self._request("POST", f"/functions/{function_id}/promote").json())
+
+    # ---- Modules (platform-module-deps branch, 2026-09-03) ---------------
+    def check_module_requirements(self, requires: list[str]) -> list[ModuleRequirementStatus]:
+        """Calls gateway's GET /modules/check-requirements — see that
+        endpoint's docstring (gateway/app/modules.py) and
+        ModuleRequirementStatus's own docstring for what's actually being
+        asked. `requires` is sent as repeated `?requires=` query params
+        (httpx does this automatically for a list value); an empty list is
+        a legal, if pointless, call — returns an empty list back."""
+        response = self._request("GET", "/modules/check-requirements", params={"requires": requires})
+        return [ModuleRequirementStatus.model_validate(r) for r in response.json()["results"]]

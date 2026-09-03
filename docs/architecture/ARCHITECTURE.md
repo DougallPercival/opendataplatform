@@ -109,10 +109,14 @@ Testing this on a cluster you intend to destroy afterward — a cloud VM set spu
   CLI logic), so reinstalling the same module gets its data back — pass `--purge-data` and the CLI
   prints the `kubectl delete pvc` command to also drop its PVCs yourself (it doesn't run this for
   you — no cluster credentials, no undo). Bucket/schema ownership for `--purge-data` is **still
-  not built** — PVCs only this pass; see `docs/architecture/module-lifecycle-plan.md`. The Add-ons
-  page's own "Remove & delete data" button, and dependency-checking on `requires: [...]`, are also
-  **not built yet** — both need gateway's module-registry endpoint (`module-lifecycle-plan.md`
-  items 6-7), a separate, later branch from the one that built install/uninstall themselves.
+  not built** — PVCs only this pass; see `docs/architecture/module-lifecycle-plan.md`.
+  Dependency-checking on `requires: [...]` **is now built** (`platform-module-deps` branch,
+  2026-09-03, `module-lifecycle-plan.md` item 6): gateway's `GET /modules/check-requirements`
+  checks live Argo CD `Application` health, and `platform module install` blocks on it before
+  writing anything (`--skip-requires-check` bypasses it). The Add-ons page's own "Remove & delete
+  data" button, and the rest of gateway's module registry/nav aggregation, are still **not built
+  yet** (`module-lifecycle-plan.md` item 7) — those need `ui-shell` to exist at all, which it
+  doesn't yet, a separate and later piece of work than either of the two branches above.
 - `bootstrap/teardown.sh` is the mirror of `install.sh`: uninstalls every module in `modules-enabled/` (with data purged, since the goal is a clean slate), removes core, removes Argo CD, then runs k3s's own `k3s-uninstall.sh` — so the machine ends up exactly where it was before `install.sh` ever ran, whether that machine is a spare box at home or a cloud VM. What it deliberately doesn't touch is the compute itself: on hardware you own, that's a machine you still have; on a cloud VM, actually reclaiming cost means terminating the instance, which is one layer above this script.
 - For cloud test clusters specifically, it's worth provisioning them through a minimal Terraform (or equivalent) module that spins the VMs up *and* tears them down — pairing `terraform apply` with `bootstrap/install.sh`, and `terraform destroy` as the last step regardless of whether `teardown.sh` ran first. A full test cycle then costs exactly as long as the test took, and nothing lingers to show up on a bill.
 

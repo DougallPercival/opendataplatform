@@ -81,10 +81,17 @@ Each item names the ARCHITECTURE.md section that already specifies its design, w
 
 6. **Dependency checking (`requires: [...]`) "at the API layer both doors call through"** (§3's own
    phrasing — "the dependency check lives once, at the API layer both doors call through," referring
-   to the CLI door and the Add-ons-page door sharing one check). Needs gateway to grow an endpoint
-   for this; gateway's own README already flags the general module-registry-driven proxying work as
-   "future work once there's a second module to proxy to" — this is part of that same future work,
-   not separate from it.
+   to the CLI door and the Add-ons-page door sharing one check). ✅ **Built** (platform-module-deps
+   branch, 2026-09-03) — `GET /modules/check-requirements` (`src/core/gateway/app/modules.py`,
+   `app/argocd.py`), which answers "is module X installed and healthy" by listing Argo CD
+   `Application`s via the Kubernetes API (new RBAC: a `gateway` ServiceAccount read-only-scoped to
+   `applications.argoproj.io` in `argocd`, see `argocd/README.md`), not "what does module X
+   require" — the caller (`platform module install`, `platform_cli/module.py`'s `_check_requires`)
+   already has its own `requires: [...]` list from the manifest it just validated, so no static
+   module index was needed for this slice (that index is still future work — see item 7 below).
+   `--skip-requires-check` is the escape hatch. A module with `requires: []` (the template's own
+   default now, and `hello-module`'s) never calls gateway at all — `install` stays exactly as
+   login-free as it was before this branch.
 
 7. **gateway's module registry / `PlatformModule` registrations / the Add-ons page API**, and
    `ui-shell` itself. Both explicitly out of scope today: `src/core/gateway/README.md`'s "What's NOT
@@ -121,6 +128,14 @@ requires them to already exist. Splitting here mirrors how `platform-ingress` an
 `catalog-service-netpol` each shipped independently useful, narrowly-scoped pieces rather than one
 large branch.
 
+**Item 6 done (2026-09-03, platform-module-deps branch):** turned out smaller than it first looked
+once recognized that the caller already has the `requires` list locally — see item 6's own ✅ marker
+above for the full design. Item 7 (gateway's module registry, the Add-ons page, `ui-shell`) stayed
+scoped out again, same "properly scope, don't bundle" call this doc already made once — `ui-shell`
+was still a five-line README with zero frontend tooling anywhere in the repo when this branch was
+scoped, confirmed via a repo-wide search for `package.json`/npm/React/`.tsx`/etc. that came back
+empty.
+
 ## Open questions this doc deliberately doesn't resolve
 
 Resolved by the platform-module-lifecycle branch (2026-09-03) — kept here, marked, rather than
@@ -140,8 +155,15 @@ deleted, so the reasoning stays visible next to the question it answers:
   and `install`-time (a bad module.yaml, including unknown fields — `ModuleManifest`'s
   `extra="forbid"`) — never silently, and never left for Argo CD to discover as a Degraded sync.
 
-Still open, unresolved by this branch — items 6-7's own scope, not this slice's:
+Resolved by the platform-module-deps branch (2026-09-03):
 
-- Dependency checking (`requires: [...]`) enforcement — item 6, needs a gateway endpoint.
+- ~~Dependency checking (`requires: [...]`) enforcement (item 6)~~ — **resolved**: see item 6's own
+  ✅ marker above.
+
+Still open, unresolved by either branch — item 7's own scope:
+
 - The bucket/schema half of `--purge-data`'s data-ownership convention (see above).
-- Everything in items 6-7: gateway's module registry, the Add-ons page, `ui-shell`.
+- Everything in item 7: gateway's module registry, the Add-ons page, `ui-shell` (including the
+  static `modules/*/module.yaml` index the Add-ons page will need to list modules that *aren't*
+  installed yet — item 6's live-Argo-CD-query approach deliberately didn't need that index, but
+  item 7 still will).

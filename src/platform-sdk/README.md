@@ -29,6 +29,16 @@ from running code (ARCHITECTURE.md §3/§4) still doesn't exist; `publish_functi
 `signature`/`docstring` are caller-supplied strings for now, same as `location_uri` already is for
 datasets.
 
+## Module dependency-checking (2026-09-03, platform-module-deps branch)
+
+`check_module_requirements(requires: list[str]) -> list[ModuleRequirementStatus]` calls gateway's
+`GET /modules/check-requirements` (module-lifecycle-plan.md item 6) — for each module id passed
+in, whether it's actually installed and Argo CD-healthy right now, not whether *this* module
+declares it as a dependency (that list is the caller's own `module.yaml`, already in hand — see
+`ModuleRequirementStatus`'s docstring in `models.py`). `platform-cli`'s `module install` is the
+first caller (`platform_cli/module.py`'s `_check_requires`), blocking before writing anything if a
+declared `requires: [...]` entry isn't satisfied yet.
+
 ## Real auth: `platform login` + token-based `PlatformClient` (2026-09-02, platform-gateway-auth branch)
 
 **Breaking change.** `PlatformClient` no longer takes `user`/`role` constructor args, and

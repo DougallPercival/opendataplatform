@@ -75,6 +75,17 @@ class ModuleManifest(BaseModel):
     navPath: str
     proxyTo: str
     healthCheck: str = "/healthz"
+    # Other module IDs only — things that can appear in modules-enabled/,
+    # i.e. something `platform module install` itself generated an
+    # Application for. NOT core services (auth/Keycloak, catalog-service,
+    # gateway, ...): those are always present (bootstrap/install.sh's Phase
+    # 0), never installed this way, so no Application will ever exist for
+    # them — module-lifecycle-plan.md item 6's dependency check
+    # (platform_cli/module.py's `install`, gateway's
+    # GET /modules/check-requirements) takes this literally and would
+    # permanently fail for a `requires` entry that isn't a real module id.
+    # See src/modules/_template/module.yaml's own comment on this same
+    # point, and this branch's plan, decision 5.
     requires: list[str] = Field(default_factory=list)
     optional: bool = True
     namespace: str | None = None

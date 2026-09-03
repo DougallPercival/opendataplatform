@@ -144,6 +144,22 @@ class TokenSet(BaseModel):
     preferred_username: str | None
 
 
+class ModuleRequirementStatus(BaseModel):
+    """One entry of gateway's `GET /modules/check-requirements` response
+    (module-lifecycle-plan.md item 6, platform-module-deps branch,
+    2026-09-03) — mirrors that endpoint's response shape exactly (see
+    gateway/app/modules.py's docstring for why the satisfaction check lives
+    there, not here or in platform-cli). `status` is the raw Argo CD health
+    string ("Healthy", "Progressing", "Degraded", ...) or the literal
+    `"not installed"` when no Application exists for this module at all —
+    `satisfied` is just `status == "Healthy"`, already computed
+    server-side, so callers never need to know that string themselves."""
+
+    module_id: str
+    satisfied: bool
+    status: str
+
+
 class Principal(BaseModel):
     """Body of GET /me — see catalog-service's PrincipalRead docstring for
     why this is a "who does the server think I am" snapshot, not a

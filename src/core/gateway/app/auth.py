@@ -167,3 +167,16 @@ def derive_headers(claims: dict, x_workspace: str | None) -> DerivedHeaders:
         f"Not a member of workspace {x_workspace!r} (no matching group in this token's 'groups' claim) "
         "— ask a workspace owner to `platform workspace invite` you.",
     )
+
+
+async def require_auth(authorization: str | None, x_workspace: str | None, jwks: JWKSCache) -> DerivedHeaders:
+    """Thin composition of verify_token()+derive_headers() for routes other
+    than proxy.py's catch-all — added platform-module-deps branch, 2026-09-03,
+    so app/modules.py's /modules/check-requirements can require the exact
+    same auth proxy.py already enforces (a verified token AND membership in
+    the workspace named by X-Workspace) without proxy.py itself being
+    touched, or this logic being written a second time. Raises AuthError
+    exactly like both functions it wraps — callers convert that to a
+    JSONResponse the same way proxy.py's `except AuthError` block does."""
+    claims = await verify_token(authorization, jwks)
+    return derive_headers(claims, x_workspace)
