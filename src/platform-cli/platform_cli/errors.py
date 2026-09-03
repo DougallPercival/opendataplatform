@@ -16,6 +16,12 @@ didn't work" — just from different backends or different failure stages:
   - NotAuthenticatedError — some other command found no usable saved
                            credentials and needs `platform login` run first.
 
+`handle_module_errors`, added platform-module-lifecycle branch (2026-09-03), is a second,
+deliberately separate decorator for `platform module install/uninstall/scaffold` — those commands
+don't talk to gateway/Keycloak at all (git and local files only), so they get their own decorator
+for their own failure surface (ManifestError, RepoError) rather than one more except clause bolted
+onto this HTTP-shaped one.
+
 functools.wraps matters here for a reason beyond the usual "preserve
 __name__/__doc__": Typer builds each command's CLI signature (its options
 and arguments) via inspect.signature() on the decorated function, and
@@ -32,6 +38,9 @@ from collections.abc import Callable
 
 import typer
 from platform_sdk import KeycloakAdminError, NotAuthenticatedError, PlatformAPIError, PlatformLoginError
+
+from platform_cli.manifest import ManifestError
+from platform_cli.repo import RepoError
 
 
 def handle_api_errors[F: Callable](func: F) -> F:
@@ -56,6 +65,27 @@ def handle_api_errors[F: Callable](func: F) -> F:
             raise typer.Exit(code=1) from exc
         except PlatformLoginError as exc:
             typer.secho(f"Login failed: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+
+    return wrapper  # type: ignore[return-value]
+
+
+def handle_module_errors[F: Callable](func: F) -> F:
+    """`platform module install/uninstall/scaffold`'s own decorator (platform-module-lifecycle
+    branch, 2026-09-03) — a separate one from handle_api_errors, not one more except clause added
+    there, because these commands don't talk to gateway/Keycloak at all: they read module.yaml
+    (manifest.py's ManifestError) and touch git (repo.py's RepoError), a genuinely different
+    failure surface that deserves its own decorator rather than overloading the HTTP-shaped one."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except ManifestError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+        except RepoError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1) from exc
 
     return wrapper  # type: ignore[return-value]

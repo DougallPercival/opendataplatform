@@ -17,6 +17,7 @@ install in the right order and wait for the previous wave to go healthy first:
 | 2 | keycloak-instance, monitoring, postgres-backup, catalog-database | Needs its own operator's CRDs (wave 1) AND postgres-cluster (also wave 1) to exist first — postgres-backup specifically needs the `ObjectStore` CRD that postgres-backup-plugin (wave 1) registers; catalog-database needs `platform-postgres` and its `catalog` role (both wave 1) to exist as something to reference |
 | 3 | keycloak-realm, catalog-service | keycloak-realm seeds the workspace-group model (`../auth/realm-platform.yaml`) via a `KeycloakRealmImport` Job against the live admin API — needs the actual `Keycloak` instance (wave 2) running, not just applied. catalog-service needs the `catalog` database (wave 2's `catalog-database`) to actually exist before its PreSync migration Job can run against it |
 | 4 | gateway | One after catalog-service — cosmetic Argo CD UI ordering only (avoids a redundant simultaneous-wave Degraded flash while catalog-service's own PreSync migration Job is still running), not a real dependency; see `manifests/gateway.yaml`'s own comment. Needs `platform-ca-secret` mirrored into the `gateway` namespace (Reflector, `manifests/cluster-issuer.yaml`) to actually be present for gateway's readiness probe to pass, same "applied isn't the same as ready" caveat as everywhere else in this table |
+| 5 | modules-root | One after gateway — best-effort ordering only (dependency-checking on individual modules' `requires:` isn't built yet, see `docs/architecture/module-lifecycle-plan.md`), not enforced. Watches `src/modules-enabled/` and turns whatever `platform module install` puts there into running modules — see `apps/core/modules-root.yaml`'s own comment for the full three-level app-of-apps shape |
 
 `apps/optional/<capability>/*.yaml` follow the same wave numbering independently within their own
 capability — MetalLB's controller (wave 0) and its IP pool config (wave 1) still need to install in
@@ -28,7 +29,7 @@ and `manifests/gateway.yaml` themselves, not a dedicated `Application` — each 
 already syncs its one manifest file whole, so they ride along on waves 2 and 4 above with no table
 change. Don't go looking for a wave-5 Ingress entry; there isn't one.
 
-`postgres-operator`/`postgres-cluster` (CloudNativePG) are Phase 1 in ARCHITECTURE.md's build order, pulled forward into Phase 0 here because Keycloak needs a database before Phase 1 would otherwise provide one — see the comments in `manifests/postgres-cluster.yaml` and `keycloak-instance.yaml` for the reasoning. WAL-archive backups (`postgres-backup-plugin`, `postgres-backup`) followed once SeaweedFS existed to archive them to — see `manifests/postgres-backup.yaml`. `catalog-database` (Phase 2 kickoff, 2026-09-01) is the same `platform-postgres` cluster hosting a second database via CNPG's declarative `Database` CRD — see `manifests/catalog-database.yaml` and `src/core/catalog-service/README.md`. `catalog-service` is catalog-lite itself (the FastAPI service, not its database) — see `manifests/catalog-service.yaml` for the PreSync migration Job / Deployment / Service shape and `.github/workflows/ci.yml` for the image that Deployment pulls. That same file also carries a `NetworkPolicy` (`catalog-service-netpol` branch, 2026-09-03) restricting ingress to catalog-service's pods to the `gateway` namespace only, on port 8000 — closing the network-layer half of `docs/known-issues.md`'s "catalog-service's auth was a placeholder" entry. `gateway` (platform-gateway-auth branch, 2026-09-02) verifies Keycloak JWTs and proxies to catalog-service with derived, trustworthy headers — see `manifests/gateway.yaml` for the Deployment/Service shape and `src/core/gateway/README.md` for what it does and doesn't cover yet.
+`postgres-operator`/`postgres-cluster` (CloudNativePG) are Phase 1 in ARCHITECTURE.md's build order, pulled forward into Phase 0 here because Keycloak needs a database before Phase 1 would otherwise provide one — see the comments in `manifests/postgres-cluster.yaml` and `keycloak-instance.yaml` for the reasoning. WAL-archive backups (`postgres-backup-plugin`, `postgres-backup`) followed once SeaweedFS existed to archive them to — see `manifests/postgres-backup.yaml`. `catalog-database` (Phase 2 kickoff, 2026-09-01) is the same `platform-postgres` cluster hosting a second database via CNPG's declarative `Database` CRD — see `manifests/catalog-database.yaml` and `src/core/catalog-service/README.md`. `catalog-service` is catalog-lite itself (the FastAPI service, not its database) — see `manifests/catalog-service.yaml` for the PreSync migration Job / Deployment / Service shape and `.github/workflows/ci.yml` for the image that Deployment pulls. That same file also carries a `NetworkPolicy` (`catalog-service-netpol` branch, 2026-09-03) restricting ingress to catalog-service's pods to the `gateway` namespace only, on port 8000 — closing the network-layer half of `docs/known-issues.md`'s "catalog-service's auth was a placeholder" entry. `gateway` (platform-gateway-auth branch, 2026-09-02) verifies Keycloak JWTs and proxies to catalog-service with derived, trustworthy headers — see `manifests/gateway.yaml` for the Deployment/Service shape and `src/core/gateway/README.md` for what it does and doesn't cover yet. `modules-root` (platform-module-lifecycle branch, 2026-09-03, `apps/core/modules-root.yaml`) is the reconciliation engine `docs/architecture/module-lifecycle-plan.md`'s first slice needed before `platform module install/uninstall` could exist at all — a second-level app-of-apps, same mechanism `root-app.yaml` itself uses one level up, watching `../modules-enabled/` instead of `apps/core/`. Every file `platform module install <name>` writes there is itself a complete `Application` manifest generated by `platform_cli/manifest.py`, sourced from `src/charts/<name>/` — see `../modules/README.md` and `../modules-enabled/README.md` for the `modules/` (catalog) vs. `modules-enabled/` (turned on) split this relies on, and `src/modules/hello-module/module.yaml` / `src/charts/hello-module/` for the one real module this branch ships to prove the mechanism end to end.
 
 `manifests/` — plain Kubernetes resources (not Helm releases) that some of the `apps/` Applications
 point at directly: the MetalLB IP pool, the cert-manager ClusterIssuer, the Keycloak CR. These are
@@ -104,15 +105,19 @@ Every other `Application` in this folder is read straight from GitHub *by Argo C
 mechanism for a plain `directory:`-sourced Application. So any Application manifest in here that
 points back at this same repo (`postgres-cluster`, `postgres-backup-plugin`, `postgres-backup`,
 `catalog-database`, `catalog-service`, `gateway`, `cert-manager-issuers`, `metallb-config`,
-`keycloak-instance`, `keycloak-realm` — the ones sourcing `manifests/*.yaml` or `../auth/*.yaml` from
-this repo, as opposed to an external chart) has to use
-a real, literal `repoURL`/`targetRevision`, not a placeholder. A placeholder left in one of these
-isn't "filled in later" the way it is in `root-app.yaml` — it's a permanently broken source that
-Argo CD can never resolve, and it fails silently as a stuck `Unknown` sync status with no obvious
-symptom pointing at the cause (this bit us in testing — see `docs/known-issues.md`).
+`keycloak-instance`, `keycloak-realm`, `modules-root` — the ones sourcing `manifests/*.yaml`,
+`../auth/*.yaml`, or `../modules-enabled/` from this repo, as opposed to an external chart) has to
+use a real, literal `repoURL`/`targetRevision`, not a placeholder. A placeholder left in one of
+these isn't "filled in later" the way it is in `root-app.yaml` — it's a permanently broken source
+that Argo CD can never resolve, and it fails silently as a stuck `Unknown` sync status with no
+obvious symptom pointing at the cause (this bit us in testing — see `docs/known-issues.md`).
 
-Current convention: these eight hardcode `repoURL: git@github.com:DougallPercival/opendataplatform.git`
+Current convention: these hardcode `repoURL: git@github.com:DougallPercival/opendataplatform.git`
 and `targetRevision: dev`. If you deliberately bootstrap from a different branch (a feature branch,
-say, for isolated testing), `root` itself will track it fine via `--revision`, but these eight will
-keep tracking `dev` until you update them by hand — a known, accepted limitation of this pattern
-rather than something `install.sh` can fix for you.
+say, for isolated testing), `root` itself will track it fine via `--revision`, but these will keep
+tracking `dev` until you update them by hand — a known, accepted limitation of this pattern rather
+than something `install.sh` can fix for you. Every module Application `platform module install`
+generates follows the same `targetRevision: dev` convention, but discovers its `repoURL` live via
+`git remote get-url origin` rather than hardcoding it — see `platform_cli/repo.py`'s
+`discover_repo_url` docstring for why generated content doesn't need the same "update by hand"
+caveat hand-authored files here do.
