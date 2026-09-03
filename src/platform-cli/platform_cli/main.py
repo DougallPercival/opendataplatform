@@ -35,6 +35,7 @@ from platform_sdk import PlatformClient
 
 from platform_cli.dataset import app as dataset_app
 from platform_cli.errors import handle_api_errors
+from platform_cli.function import app as function_app
 from platform_cli.login import login as login_command
 from platform_cli.workspace import app as workspace_app
 
@@ -46,6 +47,7 @@ app = typer.Typer(
 )
 app.add_typer(workspace_app, name="workspace", help="Manage workspaces.")
 app.add_typer(dataset_app, name="dataset", help="Manage datasets.")
+app.add_typer(function_app, name="function", help="Manage functions.")
 app.command("login", help="Log in via your browser (OAuth device flow).")(login_command)
 
 

@@ -15,6 +15,8 @@ import pytest
 from platform_sdk import (
     Dataset,
     DeviceAuthorization,
+    Function,
+    FunctionVersion,
     InviteResult,
     KeycloakAdminError,
     NotAuthenticatedError,
@@ -87,6 +89,39 @@ class FakeClient:
     def delete_dataset(self, dataset_id):
         return self._record("delete_dataset", dataset_id)
 
+    def list_functions(self):
+        return self._record("list_functions") or []
+
+    def create_function(self, name, *, visibility=Visibility.PRIVATE, description=None, module_path=None):
+        return self._record(
+            "create_function", name, visibility=visibility, description=description, module_path=module_path
+        )
+
+    def get_function(self, function_id):
+        return self._record("get_function", function_id)
+
+    def update_function(self, function_id, **fields):
+        return self._record("update_function", function_id, **fields)
+
+    def delete_function(self, function_id):
+        return self._record("delete_function", function_id)
+
+    def list_function_versions(self, function_id):
+        return self._record("list_function_versions", function_id) or []
+
+    def publish_function(self, function_id, *, signature, module_path, docstring=None, published_by=None):
+        return self._record(
+            "publish_function",
+            function_id,
+            signature=signature,
+            module_path=module_path,
+            docstring=docstring,
+            published_by=published_by,
+        )
+
+    def promote_function(self, function_id):
+        return self._record("promote_function", function_id)
+
 
 @pytest.fixture
 def fake_client(monkeypatch):
@@ -151,6 +186,38 @@ def _dataset(name="reddit-sentiment", **overrides) -> Dataset:
     return Dataset(**fields)
 
 
+def _function(name="clean_text", **overrides) -> Function:
+    fields = dict(
+        id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        name=name,
+        visibility=Visibility.PRIVATE,
+        description=None,
+        current_version=0,
+        module_path=None,
+        created_by="alice",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    fields.update(overrides)
+    return Function(**fields)
+
+
+def _function_version(function_id, version=1, **overrides) -> FunctionVersion:
+    fields = dict(
+        id=uuid.uuid4(),
+        function_id=function_id,
+        version=version,
+        signature="def clean_text(s: str) -> str",
+        docstring=None,
+        module_path="pipelines.reddit.clean_text",
+        published_by="alice",
+        published_at=datetime.now(UTC),
+    )
+    fields.update(overrides)
+    return FunctionVersion(**fields)
+
+
 def test_me_prints_principal(fake_client):
     principal = Principal(
         workspace_id=uuid.uuid4(), workspace_name="personal", user_id="alice", role="owner"
@@ -200,6 +267,88 @@ def test_dataset_update_only_sends_the_flags_actually_passed(fake_client):
     method, args, kwargs = fake_client.calls[-1]
     assert args == (dataset_id,)
     assert kwargs == {"description": "new desc"}  # visibility/location_uri NOT present, not None-valued
+
+
+def test_function_create_passes_visibility_case_insensitively(fake_client):
+    fake_client.queue("create_function", _function("public-fn", visibility=Visibility.PUBLIC))
+    result = runner.invoke(app, ["function", "create", "public-fn", "--visibility", "PUBLIC"])
+    assert result.exit_code == 0, result.output
+    method, args, kwargs = fake_client.calls[-1]
+    assert kwargs["visibility"] == Visibility.PUBLIC
+
+
+def test_function_update_with_no_flags_exits_nonzero_without_calling_client(fake_client):
+    result = runner.invoke(app, ["function", "update", str(uuid.uuid4())])
+    assert result.exit_code == 1
+    assert fake_client.calls == []
+
+
+def test_function_update_only_sends_the_flags_actually_passed(fake_client):
+    function_id = str(uuid.uuid4())
+    fake_client.queue("update_function", _function(description="new desc"))
+    result = runner.invoke(app, ["function", "update", function_id, "--description", "new desc"])
+    assert result.exit_code == 0, result.output
+    method, args, kwargs = fake_client.calls[-1]
+    assert args == (function_id,)
+    assert kwargs == {"description": "new desc"}  # visibility NOT present, not None-valued
+
+
+def test_function_publish_requires_signature_and_module_path(fake_client):
+    # Typer's own "missing option" enforcement, not this repo's code — just
+    # confirming these two really are required, matching FunctionPublish's
+    # schema (app/schemas.py), not accidentally optional.
+    result = runner.invoke(app, ["function", "publish", str(uuid.uuid4())])
+    assert result.exit_code != 0
+    assert fake_client.calls == []
+
+
+def test_function_publish_sends_flags_and_prints_version(fake_client):
+    function_id = str(uuid.uuid4())
+    fake_client.queue("publish_function", _function_version(function_id, version=1))
+    result = runner.invoke(
+        app,
+        [
+            "function", "publish", function_id,
+            "--signature", "def clean_text(s: str) -> str",
+            "--module-path", "pipelines.reddit.clean_text",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    method, args, kwargs = fake_client.calls[-1]
+    assert args == (function_id,)
+    assert kwargs["signature"] == "def clean_text(s: str) -> str"
+    assert kwargs["module_path"] == "pipelines.reddit.clean_text"
+    assert kwargs["published_by"] is None  # not passed, not invented
+    assert "v1" in result.output
+
+
+def test_function_promote_takes_no_flags_and_prints_new_visibility(fake_client):
+    function_id = str(uuid.uuid4())
+    fake_client.queue("promote_function", _function(id=function_id, visibility=Visibility.PUBLIC))
+    result = runner.invoke(app, ["function", "promote", function_id])
+    assert result.exit_code == 0, result.output
+    method, args, kwargs = fake_client.calls[-1]
+    assert args == (function_id,)
+    assert kwargs == {}  # no flags to pass through — the endpoint takes no body
+    assert "public" in result.output
+
+
+def test_function_versions_lists_newest_first_as_given_by_the_client(fake_client):
+    function_id = str(uuid.uuid4())
+    fake_client.queue(
+        "list_function_versions",
+        [_function_version(function_id, version=2), _function_version(function_id, version=1)],
+    )
+    result = runner.invoke(app, ["function", "versions", function_id])
+    assert result.exit_code == 0, result.output
+    assert "v2" in result.output
+    assert "v1" in result.output
+
+
+def test_function_versions_empty_says_so(fake_client):
+    result = runner.invoke(app, ["function", "versions", str(uuid.uuid4())])
+    assert result.exit_code == 0
+    assert "No published versions" in result.output
 
 
 def test_api_error_prints_to_stderr_and_exits_1(fake_client):

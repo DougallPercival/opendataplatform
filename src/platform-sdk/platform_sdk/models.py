@@ -9,10 +9,10 @@ REST contract rather than its Python internals, is the actual decoupling —
 same tradeoff models.py's own `_pg_enum` comment makes elsewhere in this
 repo, applied one layer up.
 
-Only Workspace, Dataset, and Principal exist yet — the minimal slice this
-pass covers. Pipeline/MLModel/Function/FunctionVersion/LineageEdge are the
-same shape of work again once platform-cli actually needs them (see this
-package's README).
+Workspace, Dataset, Principal, and — as of the platform-function-promote
+branch (2026-09-03) — Function/FunctionVersion exist. Pipeline/MLModel/
+LineageEdge are the same shape of work again once platform-cli actually
+needs them (see this package's README).
 """
 from __future__ import annotations
 
@@ -51,6 +51,39 @@ class Dataset(BaseModel):
     created_by: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class Function(BaseModel):
+    """Mirrors app.schemas.FunctionRead over in catalog-service — see this
+    module's docstring for why duplicating the shape (not importing it) is
+    the point. current_version=0 means "registered but never published"
+    (see app/models.py's Function docstring); module_path is null until the
+    first publish() sets it."""
+
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    name: str
+    visibility: Visibility
+    description: str | None
+    current_version: int
+    module_path: str | None
+    created_by: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class FunctionVersion(BaseModel):
+    """Mirrors app.schemas.FunctionVersionRead — one row per publish(), full
+    history kept (see app/models.py's FunctionVersion docstring for why)."""
+
+    id: uuid.UUID
+    function_id: uuid.UUID
+    version: int
+    signature: str
+    docstring: str | None
+    module_path: str
+    published_by: str | None
+    published_at: datetime
 
 
 class Role(enum.StrEnum):
