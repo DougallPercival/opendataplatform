@@ -121,6 +121,33 @@ def test_function_publish_bumps_version_and_promote_makes_it_public(client):
     assert cross.status_code == 200
 
 
+def test_deleting_a_published_function_cascades_its_versions(client):
+    # Regression test for a real bug found live 2026-09-03
+    # (platform-function-promote branch): deleting a Function with at least
+    # one published FunctionVersion used to 500 (an unnamed FK with no ON
+    # DELETE clause rejected the delete outright, uncaught by crud.py) — see
+    # app/models.py's FunctionVersion comment and migrations/versions/0002_*.
+    created = client.post(
+        "/functions",
+        headers={"X-Workspace": "personal"},
+        json={"name": "to-be-deleted", "visibility": "private"},
+    )
+    function_id = created.json()["id"]
+
+    published = client.post(
+        f"/functions/{function_id}/publish",
+        headers={"X-Workspace": "personal"},
+        json={"signature": "f() -> None", "module_path": "pkg.mod.f"},
+    )
+    assert published.status_code == 201, published.text
+
+    deleted = client.delete(f"/functions/{function_id}", headers={"X-Workspace": "personal"})
+    assert deleted.status_code == 204, deleted.text
+
+    missing = client.get(f"/functions/{function_id}", headers={"X-Workspace": "personal"})
+    assert missing.status_code == 404
+
+
 def test_viewer_role_reads_but_cannot_create_or_write(client):
     # Set up as owner (the default — no X-Role needed) so there's something
     # for the viewer to read and to fail to write.

@@ -25,9 +25,13 @@ thing. See "Not yet built" below for what's deliberately left for the next steps
   trust-boundary writeup, including the one gap that's still open at the network layer).
 - `app/routers/` — CRUD for each entity type, plus `functions.py`'s `/publish` and `/promote`
   (the `platform-cli function promote --public` §4 calls out by name) and `lineage.py`.
-- `migrations/` — Alembic, hand-written initial migration (`0001_initial_schema.py`, no live DB in
-  the environment that built this to autogenerate against) — seeds the `personal` workspace to
-  match `../auth/realm-platform.yaml`'s seeded Keycloak group.
+- `migrations/` — Alembic, hand-written (no live DB in the environment that built this to
+  autogenerate against). `0001_initial_schema.py` seeds the `personal` workspace to match
+  `../auth/realm-platform.yaml`'s seeded Keycloak group. `0002_function_versions_cascade.py`
+  (2026-09-03, `platform-function-promote` branch) adds `ON DELETE CASCADE` to
+  `function_versions.function_id` — see `docs/known-issues.md`'s "Deleting a published `Function`
+  500'd" entry for the real bug this fixed and why the constraint name is looked up dynamically
+  rather than hardcoded.
 - `tests/` — `test_visibility.py` (pure logic, no DB) and `test_datasets_api.py` (integration,
   needs a real Postgres — see that file's docstring for a one-line `docker run` to get one).
 - `Dockerfile` — builds and runs today (`docker build . && docker run -p 8000:8000 ...` against any

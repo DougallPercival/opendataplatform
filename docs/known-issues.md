@@ -509,6 +509,43 @@ reachable off-cluster — that was never in scope and stays out of scope; catalo
 door is, and remains, gateway. This entry is now fully resolved: both the application-layer and
 network-layer halves of "anyone who can reach it" are narrowed to "anyone who went through gateway."
 
+### Deleting a published `Function` 500'd — an unnamed FK with no cascade, uncaught
+
+Added and fixed 2026-09-03, `platform-function-promote` branch. Found live via the branch's own
+verification round trip: `platform function create` → `publish` → `versions` → `promote` → `update
+--visibility workspace` (demote) all worked, then `platform function delete` came back `gateway
+error (500): Internal Server Error`.
+
+Root cause, in `catalog-service` itself (not anything platform-sdk/platform-cli built this branch):
+`app/models.py`'s `FunctionVersion.function_id` foreign key had no `ondelete=` clause, so Postgres
+defaulted to `NO ACTION` — deleting a `Function` that had at least one published `FunctionVersion`
+row was rejected outright as a foreign-key violation. `app/crud.py`'s generic `delete()` (used by
+`delete_function`) does `db.delete(entity); db.commit()` with no exception handling, so that
+violation propagated as an unhandled `IntegrityError` all the way up to FastAPI's default handler —
+a bare 500, not a meaningful error. Separately confirmed while investigating: `catalog-service`'s own
+test suite (`tests/test_datasets_api.py`, which also covers `functions` and `pipelines`/`models`
+despite the filename) had zero coverage of deleting a function at all, published or not — this path
+had never actually been exercised before.
+
+**Fix:** `FunctionVersion.function_id`'s FK now carries `ondelete="CASCADE"` (a version only means
+anything in the context of the function that owns it — unlike `LineageEdge`'s already-documented
+dangling source_id/target_id, there's no reason to keep orphaned version rows once their function is
+gone). `migrations/versions/0002_function_versions_cascade.py` applies the matching change to the
+live constraint (looked up by name dynamically via `information_schema` rather than hardcoded, since
+Postgres's default FK-naming convention was never actually confirmed against the live database
+before this migration ran). `tests/test_datasets_api.py` gained
+`test_deleting_a_published_function_cascades_its_versions`, closing the coverage gap this bug hid
+in. **Confirmed fixed** — 16/16 `catalog-service` tests pass against a real (throwaway) Postgres,
+migration applies and downgrades cleanly, and the new regression test exercises exactly the path
+that 500'd.
+
+One more thing found live, worth remembering for any future hand-written Alembic migration in this
+repo: the first version of `0002_function_versions_cascade.py`'s revision id was
+`0002_function_versions_cascade_delete` (38 characters) — Alembic's default `alembic_version.
+version_num` column is `VARCHAR(32)`, so that id failed migration-time with a
+`StringDataRightTruncation` `DataError`, not at authoring time. Keep future revision ids under 32
+characters; `0001_initial_schema`'s 19-character id happened to never test this boundary.
+
 ### `platform-cli-login`'s device-grant fields — one Keycloak-version detail confirmed only at bootstrap-script-run time
 
 Added 2026-09-02, platform-gateway-auth branch. `bootstrap/keycloak-bootstrap-login-client.sh`
