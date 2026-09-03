@@ -28,10 +28,25 @@
 # file) — gateway.platform.local now replaces the manual
 # `kubectl port-forward -n gateway svc/gateway 8080:8080` that used to be the
 # only way to reach gateway from off-cluster; `platform_sdk`'s gateway_url
-# default follows suit (see platform_sdk/config.py). Default ServiceAccount,
-# no RBAC — this pass never touches the Kubernetes API or Argo CD's API
-# (that's the still-deferred Add-ons-page/module-registry scope the README
-# describes).
+# default follows suit (see platform_sdk/config.py).
+#
+# RBAC: added 2026-09-03 (platform-module-deps branch) — this repo's FIRST
+# ServiceAccount/Role/RoleBinding anywhere (everything before this ran as
+# the implicit `default` ServiceAccount with no RBAC at all, this
+# Deployment included, per the comment this replaces). GET
+# /modules/check-requirements (app/modules.py, app/argocd.py) needs to list
+# Argo CD `Application` objects to know which modules are actually
+# installed and healthy — the `gateway` ServiceAccount below is bound to a
+# `Role` scoped to exactly that: `get`/`list`/`watch` on
+# `applications.argoproj.io`, in the `argocd` namespace only, no write
+# verbs, no other resource types, no cluster-wide scope. See
+# argocd/README.md for the same note in one place other manifests point to.
+# No new env vars needed: app/config.py's k8s_api_url/k8s_sa_token_path/
+# k8s_sa_ca_path/argocd_namespace defaults already match what a real
+# Deployment gets for free once serviceAccountName is set (the standard
+# projected-token/CA mount, and the real in-cluster API server address) —
+# nothing here to override, unlike Keycloak/catalog-service's URLs above,
+# which point at services outside the automatic ServiceAccount projection.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -47,6 +62,7 @@ spec:
       labels:
         app: gateway
     spec:
+      serviceAccountName: gateway
       containers:
         - name: gateway
           image: ghcr.io/dougallpercival/gateway:dev
@@ -122,6 +138,41 @@ spec:
   ports:
     - port: 8080
       targetPort: 8080
+---
+# The repo's first ServiceAccount/Role/RoleBinding — see the RBAC comment on
+# the Deployment above for the full "why." ServiceAccount lives in gateway's
+# own namespace (where the pod runs); the Role/RoleBinding live in `argocd`
+# (where the Applications actually are) — a Role only grants access within
+# its own namespace, so this can't be a single object spanning both.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway
+  namespace: gateway
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gateway-read-module-applications
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gateway-read-module-applications
+  namespace: argocd
+subjects:
+  - kind: ServiceAccount
+    name: gateway
+    namespace: gateway
+roleRef:
+  kind: Role
+  name: gateway-read-module-applications
+  apiGroup: rbac.authorization.k8s.io
 ---
 # gateway's own Ingress-facing cert (2026-09-02, platform-ingress branch) —
 # unlike keycloak-instance.yaml's Ingress, which reuses keycloak-tls

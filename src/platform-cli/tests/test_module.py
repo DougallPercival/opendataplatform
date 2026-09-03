@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from platform_sdk import ModuleRequirementStatus
 from typer.testing import CliRunner
 
 from platform_cli.module import app
@@ -119,7 +120,7 @@ def test_install_writes_commits_and_pushes(git_repo):
     repo_root, origin_url = git_repo
     _scaffold_and_commit(repo_root, "hello")
 
-    result = runner.invoke(app, ["install", "hello"])
+    result = runner.invoke(app, ["install", "hello", "--skip-requires-check"])
     assert result.exit_code == 0, result.output
 
     generated = repo_root / "src/modules-enabled/hello.yaml"
@@ -146,7 +147,7 @@ def test_install_wires_placement_from_module_yaml(git_repo):
     )
     _commit_all(repo_root, "add placement")
 
-    result = runner.invoke(app, ["install", "hello"])
+    result = runner.invoke(app, ["install", "hello", "--skip-requires-check"])
     assert result.exit_code == 0, result.output
     content = (repo_root / "src/modules-enabled/hello.yaml").read_text()
     assert "role: compute" in content
@@ -158,7 +159,7 @@ def test_install_dry_run_writes_nothing(git_repo):
     _scaffold_and_commit(repo_root, "hello")
     before = _head(repo_root)
 
-    result = runner.invoke(app, ["install", "hello", "--dry-run"])
+    result = runner.invoke(app, ["install", "hello", "--dry-run", "--skip-requires-check"])
     assert result.exit_code == 0, result.output
     assert "would write" in result.output
     assert not (repo_root / "src/modules-enabled/hello.yaml").exists()
@@ -172,7 +173,7 @@ def test_install_rejects_module_yaml_with_unknown_field(git_repo):
     module_yaml.write_text(module_yaml.read_text() + "\nsomeTypo: oops\n")
     _commit_all(repo_root, "typo")
 
-    result = runner.invoke(app, ["install", "hello"])
+    result = runner.invoke(app, ["install", "hello", "--skip-requires-check"])
     assert result.exit_code == 1
     assert "failed validation" in result.output
     assert not (repo_root / "src/modules-enabled/hello.yaml").exists()
@@ -183,7 +184,7 @@ def test_install_requires_clean_worktree(git_repo):
     _scaffold_and_commit(repo_root, "hello")
     (repo_root / "stray.txt").write_text("uncommitted\n")
 
-    result = runner.invoke(app, ["install", "hello"])
+    result = runner.invoke(app, ["install", "hello", "--skip-requires-check"])
     assert result.exit_code == 1
     assert "uncommitted changes" in result.output
     assert not (repo_root / "src/modules-enabled/hello.yaml").exists()
@@ -199,7 +200,7 @@ def test_install_requires_chart_to_exist(git_repo):
     (repo_root / "src/modules/orphan/module.yaml").write_text(module_yaml)
     _commit_all(repo_root, "add orphan descriptor with no chart")
 
-    result = runner.invoke(app, ["install", "orphan"])
+    result = runner.invoke(app, ["install", "orphan", "--skip-requires-check"])
     assert result.exit_code == 1
     assert "chart" in result.output
     assert "scaffold" in result.output
@@ -210,7 +211,7 @@ def test_install_skips_helm_check_when_helm_not_on_path(git_repo, monkeypatch):
     _scaffold_and_commit(repo_root, "hello")
     monkeypatch.setattr("platform_cli.module.shutil.which", lambda _: None)
 
-    result = runner.invoke(app, ["install", "hello"])
+    result = runner.invoke(app, ["install", "hello", "--skip-requires-check"])
     assert result.exit_code == 0, result.output
     assert "helm` not found on PATH" in result.output
 
@@ -235,7 +236,7 @@ def test_install_runs_helm_template_when_available_and_aborts_on_failure(git_rep
 
     monkeypatch.setattr("platform_cli.module.subprocess.run", fake_run)
 
-    result = runner.invoke(app, ["install", "hello"])
+    result = runner.invoke(app, ["install", "hello", "--skip-requires-check"])
     assert result.exit_code == 1
     assert "helm template" in result.output
     assert "boom: bad chart" in result.output
@@ -257,9 +258,118 @@ def test_install_runs_helm_template_when_available_and_succeeds(git_repo, monkey
 
     monkeypatch.setattr("platform_cli.module.subprocess.run", fake_run)
 
-    result = runner.invoke(app, ["install", "hello"])
+    result = runner.invoke(app, ["install", "hello", "--skip-requires-check"])
     assert result.exit_code == 0, result.output
     assert (repo_root / "src/modules-enabled/hello.yaml").is_file()
+
+
+# --- install: dependency-checking (module-lifecycle-plan.md item 6, 2026-09-03) -------------
+#
+# install() never constructs its own PlatformClient — it reuses ctx.obj, same as every other
+# command in this CLI (workspace.py/dataset.py/function.py; see module.py's own module
+# docstring), only when manifest.requires is non-empty. Since this file invokes
+# `platform_cli.module.app` directly (not the root `platform` app main.py's callback normally
+# builds ctx.obj on), these tests set ctx.obj themselves via CliRunner.invoke's own `obj=` kwarg —
+# NOT by monkeypatching a PlatformClient constructor the way test_cli.py's FakeClient does for
+# main.py's root callback (there's no constructor call here to intercept).
+
+
+class _FakeModuleClient:
+    """Stands in for ctx.obj's PlatformClient — only check_module_requirements is implemented,
+    since that's the only method install()'s dependency check ever calls."""
+
+    def __init__(self, results: list[ModuleRequirementStatus] | None = None) -> None:
+        self._results = results or []
+        self.calls: list[list[str]] = []
+
+    def check_module_requirements(self, requires: list[str]) -> list[ModuleRequirementStatus]:
+        self.calls.append(list(requires))
+        return self._results
+
+
+def _add_requires(repo_root: Path, name: str, requires: list[str]) -> None:
+    # Real scaffolded modules start with the template's own `requires: []` default (decision 5,
+    # this branch) — this just overwrites that one line, same "edit the real generated file"
+    # spirit the rest of this test file already uses (e.g. test_install_wires_placement_...).
+    module_yaml = repo_root / f"src/modules/{name}/module.yaml"
+    text = module_yaml.read_text()
+    assert "requires: []" in text, "expected the template's own requires: [] default"
+    module_yaml.write_text(text.replace("requires: []", f"requires: [{', '.join(requires)}]"))
+
+
+def test_install_blocks_with_clear_message_when_a_required_module_is_not_satisfied(git_repo):
+    repo_root, _ = git_repo
+    _scaffold_and_commit(repo_root, "hello")
+    _add_requires(repo_root, "hello", ["catalog", "trino"])
+    _commit_all(repo_root, "add requires")
+
+    fake = _FakeModuleClient(
+        results=[
+            ModuleRequirementStatus(module_id="catalog", satisfied=False, status="not installed"),
+            ModuleRequirementStatus(module_id="trino", satisfied=False, status="Progressing"),
+        ]
+    )
+
+    result = runner.invoke(app, ["install", "hello"], obj=fake)
+
+    assert result.exit_code == 1
+    assert "catalog" in result.output
+    assert "not installed" in result.output
+    assert "trino" in result.output
+    assert "Progressing" in result.output
+    assert not (repo_root / "src/modules-enabled/hello.yaml").exists()
+    assert fake.calls == [["catalog", "trino"]]  # checked, then blocked before any write
+
+
+def test_install_proceeds_when_all_requirements_are_satisfied(git_repo):
+    repo_root, _ = git_repo
+    _scaffold_and_commit(repo_root, "hello")
+    _add_requires(repo_root, "hello", ["catalog"])
+    _commit_all(repo_root, "add requires")
+
+    fake = _FakeModuleClient(
+        results=[ModuleRequirementStatus(module_id="catalog", satisfied=True, status="Healthy")]
+    )
+
+    result = runner.invoke(app, ["install", "hello"], obj=fake)
+
+    assert result.exit_code == 0, result.output
+    assert (repo_root / "src/modules-enabled/hello.yaml").is_file()
+    assert fake.calls == [["catalog"]]
+
+
+def test_install_skip_requires_check_bypasses_the_check_entirely(git_repo):
+    repo_root, _ = git_repo
+    _scaffold_and_commit(repo_root, "hello")
+    _add_requires(repo_root, "hello", ["catalog"])
+    _commit_all(repo_root, "add requires")
+
+    # No results queued at all — if this were ever actually called, the empty list would read as
+    # "catalog: not installed" and this test would fail on exit_code, catching a regression either
+    # way rather than passing vacuously.
+    fake = _FakeModuleClient()
+
+    result = runner.invoke(app, ["install", "hello", "--skip-requires-check"], obj=fake)
+
+    assert result.exit_code == 0, result.output
+    assert "skip-requires-check" in result.output  # the visible warning
+    assert (repo_root / "src/modules-enabled/hello.yaml").is_file()
+    assert fake.calls == []  # never even asked
+
+
+def test_install_with_empty_requires_never_touches_ctx_obj(git_repo):
+    # hello's module.yaml keeps the template's own `requires: []` default untouched — this is the
+    # common case (hello-module itself, and any freshly-scaffolded module) that must stay exactly
+    # as login-free as it was before this branch: zero calls on ctx.obj's client, whatever it is.
+    repo_root, _ = git_repo
+    _scaffold_and_commit(repo_root, "hello")
+
+    fake = _FakeModuleClient()
+
+    result = runner.invoke(app, ["install", "hello"], obj=fake)
+
+    assert result.exit_code == 0, result.output
+    assert fake.calls == []
 
 
 # --- uninstall ------------------------------------------------------------------------------
@@ -267,7 +377,7 @@ def test_install_runs_helm_template_when_available_and_succeeds(git_repo, monkey
 
 def _install(repo_root: Path, name: str) -> None:
     _scaffold_and_commit(repo_root, name)
-    assert runner.invoke(app, ["install", name]).exit_code == 0
+    assert runner.invoke(app, ["install", name, "--skip-requires-check"]).exit_code == 0
 
 
 def test_uninstall_removes_commits_and_pushes(git_repo):

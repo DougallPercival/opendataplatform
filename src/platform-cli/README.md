@@ -52,28 +52,44 @@ resource here already has.
 
 ```text
 platform module scaffold NAME
-platform module install NAME [--dry-run]
+platform module install NAME [--dry-run] [--skip-requires-check]
 platform module uninstall NAME [--purge-data] [--dry-run]
 ```
 
-Genuinely different from every other command in this file: these three don't talk to
+Genuinely different from every other command in this file: `uninstall`/`scaffold` don't talk to
 `platform-gateway` at all — no login needed, no `PLATFORM_GATEWAY_URL`. They read/write files in
 whatever git checkout the CLI is invoked from and commit + push directly, per
 docs/architecture/module-lifecycle-plan.md's "Recommended first slice" (items 1-5 — the Argo CD
 reconciliation mechanism, `module.yaml` schema/validation, and the chart-wrapper node-placement
 convention all live in `platform_cli/manifest.py`, `platform_cli/repo.py`, and
-`../core/argocd/apps/core/modules-root.yaml`, not in this package alone).
+`../core/argocd/apps/core/modules-root.yaml`, not in this package alone). `install` is the one
+exception, and only conditionally — see its own bullet below.
 
 - `scaffold NAME` generates `../modules/NAME/module.yaml` and `../charts/NAME/` from
   `_template/` — writes files only, commits nothing. Edit the chart, then commit it yourself
   (`git add` + `git commit`) before running `install` — `install` refuses to run against a dirty
   working tree, so the scaffolded chart has to actually be committed first, same as any other
-  change you'd make by hand.
-- `install NAME` validates `module.yaml`, renders a complete Argo CD `Application` manifest (repo
-  URL discovered live via `git remote get-url origin`; placement wired from `module.yaml`'s own
-  `placement` block), writes it to `../modules-enabled/NAME.yaml`, and commits + pushes it — from
-  there, `modules-root` picks it up and Argo CD reconciles the module in. `--dry-run` prints the
-  generated manifest and stops before writing or committing anything.
+  change you'd make by hand. The generated `module.yaml`'s `requires: []` means "no other module
+  needed first" — fill in other module ids only (never a core service like `auth`) if this module
+  genuinely depends on one; see that file's own comment.
+- `install NAME` first checks `module.yaml`'s `requires: [...]` (module-lifecycle-plan.md item 6,
+  platform-module-deps branch, 2026-09-03): if it's non-empty, this is the one case `install` talks
+  to `platform-gateway` at all, calling `GET /modules/check-requirements` to confirm every
+  dependency is actually installed and Argo CD-healthy right now — blocks with a clear
+  per-dependency message (not installed vs. installed-but-not-Healthy-yet) before writing or
+  committing anything if not. A module with an empty `requires` (the template's own default, and
+  `hello-module`'s) never makes this call at all — install stays exactly as login-free as before
+  this branch. `--skip-requires-check` bypasses the check entirely (prints a visible warning) —
+  for bootstrapping the first module of a dependency chain, or installing while gateway/the
+  cluster is unreachable.
+
+  Once that passes (or was skipped), `install` validates `module.yaml`, renders a complete Argo CD
+  `Application` manifest (repo URL discovered live via `git remote get-url origin`; placement
+  wired from `module.yaml`'s own `placement` block), writes it to `../modules-enabled/NAME.yaml`,
+  and commits + pushes it — from there, `modules-root` picks it up and Argo CD reconciles the
+  module in. `--dry-run` prints the generated manifest and stops before writing or committing
+  anything (the requires check above still runs first, same as every other validation `install`
+  does before `--dry-run`'s stop point).
 - `uninstall NAME` removes that file and commits + pushes the removal — Argo CD prunes the
   Deployment/Service, but leaves any PersistentVolumeClaim the chart marked
   `argocd.argoproj.io/sync-options: Delete=false` alone (ARCHITECTURE.md §3's documented default:
@@ -84,8 +100,8 @@ convention all live in `platform_cli/manifest.py`, `platform_cli/repo.py`, and
   `docs/known-issues.md`) that deleting the PVC too early just gets it recreated by that
   Application's own still-live `selfHeal`.
 
-Dependency-checking on `requires: [...]` and the Add-ons page/gateway module registry (items 6-7)
-are explicitly **not** part of this slice — see `docs/architecture/module-lifecycle-plan.md`.
+Item 7 — the Add-ons page and gateway's own module registry/`ui-shell` — is still explicitly **not**
+built; item 6 (above) is. See `docs/architecture/module-lifecycle-plan.md`.
 
 ## Real auth: `platform login` (2026-09-02, platform-gateway-auth branch)
 

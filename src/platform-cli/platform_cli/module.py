@@ -5,6 +5,16 @@ workspace. They read/write files in the git checkout they're invoked from and ta
 directly (`repo.py`), per the user's own decision this branch: install/uninstall should
 auto-commit and auto-push, "operating on whatever local checkout the CLI is invoked from."
 
+`install` is now the ONE exception to "these never touch ctx.obj" (module-lifecycle-plan.md item
+6, platform-module-deps branch, 2026-09-03) — but only conditionally: it reuses the same
+PlatformClient main.py's root callback already builds on `ctx.obj` (same as workspace.py/
+dataset.py/function.py do) to call gateway's GET /modules/check-requirements, and ONLY when the
+module being installed actually declares `requires: [...]`. A module with no real dependencies —
+hello-module, and any freshly-scaffolded module, since the template's own default is `requires: []`
+— never touches ctx.obj at all, so it stays exactly as login-free as before this branch. See
+`_check_requires`'s own docstring below for the full behavior, and `--skip-requires-check` for the
+escape hatch.
+
 install/uninstall are the only two of these three that touch git — `scaffold` deliberately
 doesn't commit anything (see its own docstring below). Both install and uninstall:
 1. Resolve the repo root from the CWD (`repo.find_repo_root`).
@@ -26,9 +36,15 @@ from pathlib import Path
 
 import typer
 import yaml
+from platform_sdk import PlatformClient
 
-from platform_cli.errors import handle_module_errors
-from platform_cli.manifest import ManifestError, load_module_manifest, render_application_manifest
+from platform_cli.errors import handle_api_errors, handle_module_errors
+from platform_cli.manifest import (
+    ManifestError,
+    ModuleManifest,
+    load_module_manifest,
+    render_application_manifest,
+)
 from platform_cli.repo import commit_and_push, discover_repo_url, find_repo_root, require_clean_worktree
 
 app = typer.Typer(no_args_is_help=True)
@@ -71,10 +87,17 @@ def _run_helm_template(chart_dir: Path, values_yaml: str) -> None:
 
 
 @app.command("install")
+@handle_api_errors
 @handle_module_errors
 def install(
+    ctx: typer.Context,
     name: str,
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate and render, but write/commit nothing."),
+    skip_requires_check: bool = typer.Option(
+        False,
+        "--skip-requires-check",
+        help="Skip verifying this module's `requires: [...]` are installed and healthy first.",
+    ),
 ) -> None:
     repo_root = find_repo_root(Path.cwd())
     manifest_path = repo_root / MODULES_DIR / name / "module.yaml"
@@ -86,6 +109,8 @@ def install(
             f"{manifest_path} validates, but its chart ({chart_dir}) doesn't exist — "
             f"run `platform module scaffold {name}` first, or write the chart by hand."
         )
+
+    _check_requires(ctx, manifest, skip_requires_check)
 
     repo_url = discover_repo_url(repo_root)
     chart_path = f"{CHARTS_DIR}/{manifest.id}"
@@ -112,6 +137,55 @@ def install(
     rel_target = target.relative_to(repo_root)
     typer.echo(f"Installed {manifest.id!r} — wrote and pushed {rel_target} ({commit_hash}).")
     typer.echo("Argo CD (via modules-root) will pick it up on its next reconcile.")
+
+
+def _check_requires(ctx: typer.Context, manifest: ModuleManifest, skip: bool) -> None:
+    """module-lifecycle-plan.md item 6 (platform-module-deps branch, 2026-09-03): before writing
+    or committing anything, block install if a declared `requires: [...]` entry isn't installed
+    AND healthy right now, per gateway's GET /modules/check-requirements (the one place this
+    satisfied/not-satisfied comparison lives — see gateway/app/modules.py's docstring; this
+    function is just the CLI-side caller, not a second implementation of the check itself).
+
+    Two ways this is skipped entirely, both leaving `ctx.obj`'s PlatformClient completely
+    untouched — no login, no gateway call, no kubectl:
+    - `manifest.requires` is empty (the template's own default, and hello-module's) — the module
+      genuinely has no dependency to verify.
+    - `--skip-requires-check` was passed — an explicit, visibly-warned bypass, not a silent one;
+      for bootstrapping the first module of a dependency chain, or installing while gateway/the
+      cluster is unreachable.
+    """
+    if not manifest.requires:
+        return
+    if skip:
+        typer.secho(
+            f"warning: --skip-requires-check set — NOT verifying requires: {manifest.requires} "
+            "are installed and healthy. If they aren't, this module may come up broken.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    client: PlatformClient = ctx.obj
+    results = client.check_module_requirements(manifest.requires)
+    unsatisfied = [r for r in results if not r.satisfied]
+    if not unsatisfied:
+        return
+
+    typer.secho(
+        f"{manifest.id!r} declares requires: {manifest.requires} — not all of them are ready:",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    for r in unsatisfied:
+        reason = "not installed" if r.status == "not installed" else f"status is {r.status!r}, not Healthy"
+        typer.secho(f"  - {r.module_id}: {reason}", fg=typer.colors.RED, err=True)
+    typer.secho(
+        "Install/fix those first (`platform module install <name>`), then retry — or pass "
+        "--skip-requires-check to install anyway (not recommended unless you know this module "
+        "still works without them).",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(code=1)
 
 
 @app.command("uninstall")

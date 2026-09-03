@@ -121,3 +121,20 @@ generates follows the same `targetRevision: dev` convention, but discovers its `
 `git remote get-url origin` rather than hardcoding it — see `platform_cli/repo.py`'s
 `discover_repo_url` docstring for why generated content doesn't need the same "update by hand"
 caveat hand-authored files here do.
+
+## RBAC — gateway's Argo CD read access (platform-module-deps branch, 2026-09-03)
+
+`manifests/gateway.yaml` now includes this repo's first `ServiceAccount`/`Role`/`RoleBinding` —
+everything before this ran as the implicit `default` ServiceAccount with no RBAC at all. It exists
+because `GET /modules/check-requirements` (gateway's `app/modules.py`/`app/argocd.py`,
+module-lifecycle-plan.md item 6) has to ask the Kubernetes API which module `Application`s exist
+and whether Argo CD reports them `Healthy`, to answer "is module X installed and satisfied" for
+`platform module install`'s dependency check.
+
+Scoped as tightly as this specific need: a `Role` in the `argocd` namespace (where `Application`
+objects actually live, not gateway's own `gateway` namespace) granting `get`/`list`/`watch` on
+`applications.argoproj.io` only — no write verbs, no other resource types (no Secrets, no Pods,
+nothing), no cluster-wide `ClusterRole`. Confirming this actually grants gateway's pod the access
+it needs (as opposed to being blocked by a wrong namespace/verb/resource) can only be done live — a
+403 from the Kubernetes API is the plausible failure mode if this is ever wrong; see
+`docs/known-issues.md` if that's what you're debugging.

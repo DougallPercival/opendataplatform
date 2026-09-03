@@ -19,14 +19,28 @@ story.
 `platform login` (`platform_sdk/keycloak_login.py`, `platform-cli/platform_cli/login.py`) is the
 device-flow command that gets a real user a token to send here — see those modules' own docstrings.
 
+`GET /modules/check-requirements` (`app/modules.py`, `app/argocd.py`, platform-module-deps branch,
+2026-09-03) — module-lifecycle-plan.md item 6: "is module X installed and healthy," checked live
+against Argo CD `Application` state via the Kubernetes API (RBAC: a dedicated `gateway`
+ServiceAccount scoped read-only to `applications.argoproj.io` in the `argocd` namespace — see
+`argocd/README.md`'s new RBAC section). `platform module install` is the first caller — see
+`platform_cli/module.py`'s `_check_requires`. Same auth as the proxy (verified token + workspace
+membership); ARCHITECTURE.md §3's "the dependency check lives once, at the API layer both doors
+call through" — this is that one place, and a future Add-ons page (item 7, still not built) would
+call the exact same endpoint.
+
 ## What's NOT built yet — the rest of ARCHITECTURE.md's gateway scope
 
-Nothing here does nav aggregation, the Add-ons page API, the module registry, or reverse-proxying into
-other modules' own UIs (ARCHITECTURE.md §3). There's nothing to serve nav to yet — `ui-shell` doesn't
-exist — so building those now would be speculative. This service currently proxies to exactly one
-backend, `catalog-service`, at one fixed URL; the module-registry-driven "figure out where to proxy
-based on `modules/*/module.yaml` + live `PlatformModule` registrations + Argo CD `Application` status"
-piece ARCHITECTURE.md §3 describes is future work once there's a second module to proxy to.
+Dependency-checking is real now (above); nav aggregation, the Add-ons page API, the module
+registry proper, and reverse-proxying into other modules' own UIs (ARCHITECTURE.md §3, item 7)
+are still not built. There's nothing to serve nav to yet — `ui-shell` doesn't exist (a five-line
+README, no code, no frontend tooling anywhere in this repo) — so building those now would be
+speculative. This service still proxies to exactly one backend, `catalog-service`, at one fixed
+URL; the module-registry-driven "figure out where to proxy based on `modules/*/module.yaml` + live
+`PlatformModule` registrations + Argo CD `Application` status" piece ARCHITECTURE.md §3 describes
+is future work once there's a second module (and `ui-shell`) to proxy to — the static
+`modules/*/module.yaml` index that piece needs is a separate, larger question than
+check-requirements' live Argo CD query answers (see this branch's plan, "Explicitly deferred").
 
 NetworkPolicy enforcement isolating catalog-service's namespace ingress to gateway's namespace only is
 also deferred — see `docs/known-issues.md`. k3s's bundled Network Policy controller is enabled by

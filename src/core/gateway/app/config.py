@@ -70,6 +70,21 @@ class Settings(BaseSettings):
 
     upstream_timeout_seconds: float = 10.0
 
+    # platform-module-deps branch (2026-09-03) — app/argocd.py's in-cluster
+    # Kubernetes API client, for GET /modules/check-requirements
+    # (app/modules.py). Standard mounted-ServiceAccount paths/URL; a real
+    # Deployment always has these (see gateway.yaml's new `gateway`
+    # ServiceAccount), same "file exists -> real value, else dev-friendly
+    # gap" story as keycloak_ca_path above — see argocd.py's own docstring
+    # for what happens when they're missing (a clear 503, not a crash).
+    k8s_api_url: str = "https://kubernetes.default.svc"
+    k8s_sa_token_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    k8s_sa_ca_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    # Namespace argocd/manifests/*.yaml install every Application into
+    # (root/apps/core/modules-root/each modules-enabled/*.yaml) — see
+    # argocd/README.md.
+    argocd_namespace: str = "argocd"
+
     @property
     def jwks_path(self) -> str:
         return f"/realms/{self.keycloak_realm}/protocol/openid-connect/certs"
