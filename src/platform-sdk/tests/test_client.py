@@ -82,6 +82,38 @@ def _dataset_body(name: str = "reddit-sentiment", **overrides) -> dict:
     return body
 
 
+def _function_body(name: str = "clean_text", **overrides) -> dict:
+    body = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": str(uuid.uuid4()),
+        "name": name,
+        "visibility": "private",
+        "description": None,
+        "current_version": 0,
+        "module_path": None,
+        "created_by": "alice",
+        "created_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    body.update(overrides)
+    return body
+
+
+def _function_version_body(function_id: str, version: int = 1, **overrides) -> dict:
+    body = {
+        "id": str(uuid.uuid4()),
+        "function_id": function_id,
+        "version": version,
+        "signature": "def clean_text(s: str) -> str",
+        "docstring": None,
+        "module_path": "pipelines.reddit.clean_text",
+        "published_by": "alice",
+        "published_at": datetime.now(UTC).isoformat(),
+    }
+    body.update(overrides)
+    return body
+
+
 @respx.mock
 def test_headers_send_bearer_token_and_workspace_hint_only(client):
     route = respx.get(f"{BASE_URL}/me").mock(
@@ -244,6 +276,83 @@ def test_dataset_crud_round_trip(client):
 
     respx.delete(f"{BASE_URL}/datasets/{dataset_id}").mock(return_value=httpx.Response(204))
     client.delete_dataset(dataset_id)  # no exception = success
+
+
+@respx.mock
+def test_function_crud_round_trip(client):
+    function_id = str(uuid.uuid4())
+
+    respx.post(f"{BASE_URL}/functions").mock(
+        return_value=httpx.Response(201, json=_function_body(id=function_id))
+    )
+    created = client.create_function("clean_text", visibility=Visibility.PRIVATE)
+    assert str(created.id) == function_id
+    assert created.current_version == 0
+    assert created.module_path is None
+
+    respx.get(f"{BASE_URL}/functions").mock(
+        return_value=httpx.Response(200, json=[_function_body(id=function_id)])
+    )
+    functions = client.list_functions()
+    assert len(functions) == 1
+    assert str(functions[0].id) == function_id
+
+    respx.get(f"{BASE_URL}/functions/{function_id}").mock(
+        return_value=httpx.Response(200, json=_function_body(id=function_id))
+    )
+    fetched = client.get_function(function_id)
+    assert str(fetched.id) == function_id
+
+    respx.patch(f"{BASE_URL}/functions/{function_id}").mock(
+        return_value=httpx.Response(200, json=_function_body(id=function_id, description="updated"))
+    )
+    updated = client.update_function(function_id, description="updated")
+    assert updated.description == "updated"
+
+    respx.delete(f"{BASE_URL}/functions/{function_id}").mock(return_value=httpx.Response(204))
+    client.delete_function(function_id)  # no exception = success
+
+
+@respx.mock
+def test_function_publish_bumps_version(client):
+    function_id = str(uuid.uuid4())
+
+    respx.post(f"{BASE_URL}/functions/{function_id}/publish").mock(
+        return_value=httpx.Response(201, json=_function_version_body(function_id, version=1))
+    )
+    version = client.publish_function(
+        function_id,
+        signature="def clean_text(s: str) -> str",
+        module_path="pipelines.reddit.clean_text",
+    )
+    assert version.version == 1
+    assert version.module_path == "pipelines.reddit.clean_text"
+    # published_by wasn't passed — confirm the request body left it out
+    # entirely rather than sending an explicit null (see client.py's own
+    # comment on why: catalog-service's `body.published_by or
+    # principal.user_id` fallback only needs the key to be absent/None).
+    sent_body = respx.calls.last.request.content
+    assert b"published_by" not in sent_body
+
+    respx.get(f"{BASE_URL}/functions/{function_id}/versions").mock(
+        return_value=httpx.Response(200, json=[_function_version_body(function_id, version=1)])
+    )
+    versions = client.list_function_versions(function_id)
+    assert len(versions) == 1
+    assert versions[0].version == 1
+
+
+@respx.mock
+def test_function_promote_sets_visibility_public(client):
+    function_id = str(uuid.uuid4())
+
+    respx.post(f"{BASE_URL}/functions/{function_id}/promote").mock(
+        return_value=httpx.Response(200, json=_function_body(id=function_id, visibility="public"))
+    )
+    promoted = client.promote_function(function_id)
+    assert promoted.visibility is Visibility.PUBLIC
+    # No body at all — the endpoint is unconditional (see client.py's comment).
+    assert respx.calls.last.request.content == b""
 
 
 @respx.mock

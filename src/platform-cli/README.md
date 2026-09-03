@@ -22,11 +22,31 @@ platform dataset update DATASET_ID [--description TEXT] [--visibility ...] [--lo
 platform dataset delete DATASET_ID
 ```
 
-Not built yet: commands for the other four catalog-service resource types (pipelines, models,
-functions incl. publish/promote, lineage) — same "add it when platform-cli actually needs it"
-reasoning as everywhere else in this repo. `platform module scaffold/install` from ARCHITECTURE.md
-§3/§7 is unrelated future scope (module lifecycle, not catalog data) — not part of this package's
-current slice either.
+Not built yet: commands for the other three catalog-service resource types (pipelines, models,
+lineage) — same "add it when platform-cli actually needs it" reasoning as everywhere else in this
+repo. `platform module scaffold/install` from ARCHITECTURE.md §3/§7 is unrelated future scope
+(module lifecycle, not catalog data) — not part of this package's current slice either; see
+`docs/architecture/module-lifecycle-plan.md` for how that's actually scoped to get built.
+
+## Functions: publish + promote (2026-09-03, platform-function-promote branch)
+
+```text
+platform function list
+platform function create NAME [--visibility private|workspace|public] [--description TEXT] [--module-path TEXT]
+platform function get FUNCTION_ID
+platform function update FUNCTION_ID [--description TEXT] [--visibility ...]
+platform function delete FUNCTION_ID
+platform function versions FUNCTION_ID
+platform function publish FUNCTION_ID --signature TEXT --module-path TEXT [--docstring TEXT] [--published-by TEXT]
+platform function promote FUNCTION_ID
+```
+
+`publish`/`promote` were the two items ARCHITECTURE.md §11's Phase 2 row named explicitly
+(`platform-cli function promote`) — catalog-service's backend for both already existed
+(`app/routers/functions.py`); this branch is purely the CLI/SDK side. `promote` takes no flags —
+the endpoint always sets visibility to `public` (one-directional by design); demoting back is
+`function update FUNCTION_ID --visibility workspace`, the same generic `update` command every other
+resource here already has.
 
 ## Real auth: `platform login` (2026-09-02, platform-gateway-auth branch)
 

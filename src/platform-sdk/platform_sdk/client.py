@@ -78,7 +78,7 @@ from platform_sdk.config import SDKSettings
 from platform_sdk.credentials import load_credentials, save_credentials
 from platform_sdk.exceptions import NotAuthenticatedError, PlatformAPIError
 from platform_sdk.keycloak_login import KeycloakLoginFlow
-from platform_sdk.models import Dataset, Principal, TokenSet, Visibility, Workspace
+from platform_sdk.models import Dataset, Function, FunctionVersion, Principal, TokenSet, Visibility, Workspace
 
 # How close to actual expiry counts as "near-expiry" and triggers a silent
 # refresh before the request goes out, rather than sending a token that's
@@ -247,3 +247,69 @@ class PlatformClient:
 
     def delete_dataset(self, dataset_id: UUID | str) -> None:
         self._request("DELETE", f"/datasets/{dataset_id}")
+
+    # ---- Functions (platform-function-promote branch, 2026-09-03) --------
+    # Same shape as the Datasets block above, mirrored onto a different
+    # resource — catalog-service's app/routers/functions.py already has the
+    # full CRUD plus /publish and /promote; this is purely the client side.
+    def list_functions(self) -> list[Function]:
+        return [Function.model_validate(f) for f in self._request("GET", "/functions").json()]
+
+    def create_function(
+        self,
+        name: str,
+        *,
+        visibility: Visibility = Visibility.PRIVATE,
+        description: str | None = None,
+        module_path: str | None = None,
+    ) -> Function:
+        body = {
+            "name": name,
+            "visibility": visibility.value,
+            "description": description,
+            "module_path": module_path,
+        }
+        return Function.model_validate(self._request("POST", "/functions", json=body).json())
+
+    def get_function(self, function_id: UUID | str) -> Function:
+        return Function.model_validate(self._request("GET", f"/functions/{function_id}").json())
+
+    def update_function(self, function_id: UUID | str, **fields: Any) -> Function:
+        response = self._request("PATCH", f"/functions/{function_id}", json=fields)
+        return Function.model_validate(response.json())
+
+    def delete_function(self, function_id: UUID | str) -> None:
+        self._request("DELETE", f"/functions/{function_id}")
+
+    def list_function_versions(self, function_id: UUID | str) -> list[FunctionVersion]:
+        return [
+            FunctionVersion.model_validate(v)
+            for v in self._request("GET", f"/functions/{function_id}/versions").json()
+        ]
+
+    def publish_function(
+        self,
+        function_id: UUID | str,
+        *,
+        signature: str,
+        module_path: str,
+        docstring: str | None = None,
+        published_by: str | None = None,
+    ) -> FunctionVersion:
+        # published_by is omitted from the body when not given, not sent as
+        # an explicit null — app/routers/functions.py's own fallback is
+        # `body.published_by or principal.user_id`, which a JSON null
+        # satisfies fine, but leaving the key out entirely is the more
+        # honest "I'm not asserting a value" shape for an optional field.
+        body: dict[str, Any] = {"signature": signature, "module_path": module_path, "docstring": docstring}
+        if published_by is not None:
+            body["published_by"] = published_by
+        return FunctionVersion.model_validate(
+            self._request("POST", f"/functions/{function_id}/publish", json=body).json()
+        )
+
+    def promote_function(self, function_id: UUID | str) -> Function:
+        # No body — app/routers/functions.py's promote_function is
+        # unconditional (sets visibility=public, one-directional by design;
+        # demoting back is a plain update_function(..., visibility=...)).
+        return Function.model_validate(self._request("POST", f"/functions/{function_id}/promote").json())

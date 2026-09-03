@@ -13,9 +13,21 @@ matching the diagram literally. Same divergence-for-consistency call as elsewher
 
 Not a placeholder — real, tested code — but deliberately the minimal slice: `PlatformClient` covers
 `/me`, `/workspaces` (list/create/get), and `/datasets` (list/create/get/update/delete). Pipelines,
-models, functions (+publish/promote), and lineage are the exact same shape of work again, once
-`platform-cli` or a real `@platform.*` decorator actually needs them — see
-`platform_sdk/models.py`'s module docstring for why they're not speculatively built now.
+models, and lineage are the exact same shape of work again, once `platform-cli` or a real
+`@platform.*` decorator actually needs them — see `platform_sdk/models.py`'s module docstring for
+why they're not speculatively built now.
+
+## Functions: publish + promote (2026-09-03, platform-function-promote branch)
+
+`PlatformClient` also covers `/functions` now — `list`/`create`/`get`/`update`/`delete` (same shape
+as `/datasets` above) plus two function-specific endpoints catalog-service's `app/routers/
+functions.py` already had before this branch: `publish_function(...)` (bumps `FunctionVersion`,
+ARCHITECTURE.md §4's "a version, bumped on each publish") and `promote_function(...)` (one-directional
+visibility → public; demoting back is a plain `update_function(..., visibility=...)`). This is the
+client side only — the `@platform.function` decorator that would extract a real signature/docstring
+from running code (ARCHITECTURE.md §3/§4) still doesn't exist; `publish_function`'s
+`signature`/`docstring` are caller-supplied strings for now, same as `location_uri` already is for
+datasets.
 
 ## Real auth: `platform login` + token-based `PlatformClient` (2026-09-02, platform-gateway-auth branch)
 

@@ -7,7 +7,17 @@ from platform_sdk.exceptions import (
 )
 from platform_sdk.keycloak_admin import KeycloakAdminClient
 from platform_sdk.keycloak_login import DeviceAuthorization, KeycloakLoginFlow
-from platform_sdk.models import Dataset, InviteResult, Principal, Role, TokenSet, Visibility, Workspace
+from platform_sdk.models import (
+    Dataset,
+    Function,
+    FunctionVersion,
+    InviteResult,
+    Principal,
+    Role,
+    TokenSet,
+    Visibility,
+    Workspace,
+)
 
 __all__ = [
     "PlatformClient",
@@ -19,6 +29,8 @@ __all__ = [
     "PlatformLoginError",
     "NotAuthenticatedError",
     "Dataset",
+    "Function",
+    "FunctionVersion",
     "InviteResult",
     "Principal",
     "Role",
