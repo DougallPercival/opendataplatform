@@ -41,11 +41,12 @@ class SDKSettings(BaseSettings):
     # directly — every request now goes through platform-gateway, which
     # verifies the caller's token and forwards a derived, trustworthy
     # request to catalog-service on the client's behalf (see client.py's
-    # module docstring). Default is gateway's own port-forward address
-    # (`kubectl port-forward -n gateway svc/gateway 8080:8080`), the same
-    # "match the service's own README without either side hardcoding
-    # knowledge of the other" reasoning catalog_url's old default used.
-    gateway_url: str = "http://localhost:8080"
+    # module docstring). Default changed again (2026-09-02, platform-ingress
+    # branch) from gateway's old port-forward address
+    # (`http://localhost:8080`) to its real Ingress hostname — see
+    # src/core/argocd/manifests/gateway.yaml's own Ingress/Certificate
+    # resources — now that nothing needs a manual port-forward to reach it.
+    gateway_url: str = "https://gateway.platform.local"
     workspace: str = "personal"
 
     # --- Keycloak Admin API (platform_sdk.keycloak_admin, `platform
@@ -63,13 +64,15 @@ class SDKSettings(BaseSettings):
     # this (bootstrap/keycloak-bootstrap-cli-client.sh's printed `export`
     # line, or its read-back command for a rerun).
     keycloak_client_secret: str | None = None
-    keycloak_namespace: str = "keycloak"
-    keycloak_service_name: str = "platform-service"
-    keycloak_service_port: int = 8443
-    # Deliberately the same local port the bootstrap script uses — one
-    # number to remember, and the two never run at once in practice (the
-    # bootstrap script is a one-time setup step, this is the ongoing path).
-    keycloak_local_port: int = 18443
+    # Still needed (2026-09-02, platform-ingress branch) for exactly one
+    # thing: extract_platform_ca_cert() in _keycloak_connection.py reads
+    # platform-ca-secret's ca.crt via `kubectl get secret`, so
+    # KeycloakAdminClient/KeycloakLoginFlow can verify Keycloak's
+    # self-signed cert. NOT for a port-forward anymore — keycloak_namespace/
+    # keycloak_service_name/keycloak_service_port/keycloak_local_port/
+    # keycloak_login_local_port are gone; nothing port-forwards to Keycloak
+    # now that keycloak.platform.local resolves for real, off-cluster, via
+    # a real Ingress (see src/core/argocd/manifests/keycloak-instance.yaml).
     # Same PATH-under-sudo reasoning as bootstrap/lib/common.sh's own
     # require_cmd comments — spelled out explicitly rather than trusting
     # sudo's secure_path to include /usr/local/bin.
@@ -83,28 +86,3 @@ class SDKSettings(BaseSettings):
     # human via the device grant, and must never carry a secret a leaked CLI
     # binary could expose.
     keycloak_login_client_id: str = "platform-cli-login"
-    # A different local port from keycloak_local_port's 18443, not the same
-    # one reused — `platform login` and a command that also needs
-    # KeycloakAdminClient's self-heal path (e.g. `workspace invite` into a
-    # brand new workspace) can plausibly run back-to-back, and a
-    # still-tearing-down previous port-forward on a shared local port is a
-    # real, seen-elsewhere-in-this-repo source of flaky "address already in
-    # use" failures (see keycloak-bootstrap-login-client.sh's own
-    # PORT_FORWARD_LOCAL_PORT comment for the same reasoning applied there).
-    #
-    # NOT just a locally-scoped value, despite being framed above purely as
-    # a collision-avoidance choice: this number is also load-bearing on the
-    # cluster side. `KeycloakLoginFlow`'s forward binds 0.0.0.0 (so a
-    # human's browser can reach it), and Keycloak's hostname provider
-    # reflects the actual connection port into `verification_uri`/`iss` —
-    # so `src/core/argocd/manifests/keycloak-instance.yaml`'s Keycloak CR
-    # pins `additionalOptions: [{name: hostname-port, value: "18444"}]` to
-    # this exact same number, and `src/core/argocd/manifests/gateway.yaml`'s
-    # `GATEWAY_KEYCLOAK_PUBLIC_URL` includes `:18444` to match what that pin
-    # produces. All three have to agree (found live, 2026-09-02 — see
-    # docs/known-issues.md's "platform login's tokens failed gateway's
-    # issuer check" entry for the full chain of symptoms this mismatch
-    # caused). Changing this value without updating the other two silently
-    # reintroduces either an unreachable verification URL or a token-issuer
-    # mismatch — not a compile-time or test-time error, only a live one.
-    keycloak_login_local_port: int = 18444

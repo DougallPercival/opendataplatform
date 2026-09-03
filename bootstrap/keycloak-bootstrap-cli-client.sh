@@ -43,16 +43,22 @@
 #     --cacert so this properly trusts the real issuing CA rather than
 #     disabling TLS verification outright.
 #
-# Networking: keycloak.platform.local isn't resolvable by DNS (no local DNS
-# server — see src/core/auth/realm-platform.yaml's comments) and Keycloak's
-# hostname provider strictly enforces that hostname for everything past the
-# first request (see docs/known-issues.md's "connected fine... broke
-# immediately after" entry — a real incident, not a hypothetical). Rather
-# than asking you to add an /etc/hosts entry, this script port-forwards to
-# 127.0.0.1 itself and uses curl's --resolve to send real requests to
-# 127.0.0.1 while both the TLS SNI and the Host header still say
-# keycloak.platform.local — satisfies the hostname provider without editing
-# any system files.
+# Networking (rewritten 2026-09-02, platform-ingress branch): this used to
+# port-forward to 127.0.0.1 itself and use curl's --resolve to fake
+# keycloak.platform.local resolving there — needed because nothing else made
+# that hostname resolvable, and Keycloak's hostname provider strictly
+# enforces it for everything past the first request (see
+# docs/known-issues.md's "connected fine... broke immediately after" entry).
+# Now that a real Ingress fronts Keycloak (src/core/argocd/manifests/
+# keycloak-instance.yaml) and keycloak.platform.local resolves for real
+# off-cluster, this script just talks to https://keycloak.platform.local
+# directly with --cacert, the same way a browser or `platform login` does —
+# no port-forward, no --resolve trick. REQUIRES an /etc/hosts entry on
+# whatever machine runs this script (decision 2026-08-30: no local DNS
+# server, so per-device /etc/hosts):
+#   192.168.4.240 keycloak.platform.local gateway.platform.local
+# (the IP is ingress-nginx's LoadBalancer address — confirm with
+# `kubectl get svc -n ingress-nginx` if this ever changes).
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,21 +68,15 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 KUBECTL="sudo /usr/local/bin/kubectl"
 KEYCLOAK_HOST="keycloak.platform.local"
-KEYCLOAK_PORT="8443"
 REALM="platform"
 CLIENT_ID="platform-cli"
-PORT_FORWARD_LOCAL_PORT="18443"   # unlikely to collide with anything else already running
 
 require_cmd curl
 require_cmd jq
 require_cmd base64
 
 work_dir="$(mktemp -d)"
-pf_pid=""
 cleanup() {
-  if [[ -n "$pf_pid" ]]; then
-    kill "$pf_pid" >/dev/null 2>&1 || true
-  fi
   rm -rf "$work_dir"
 }
 trap cleanup EXIT
@@ -95,35 +95,19 @@ ADMIN_PASS="$($KUBECTL get secret platform-initial-admin -n keycloak -o jsonpath
   "Couldn't read platform-initial-admin's username/password — check it exists: \
 ${KUBECTL} get secret platform-initial-admin -n keycloak"
 
-info "Port-forwarding to Keycloak (127.0.0.1:${PORT_FORWARD_LOCAL_PORT} -> platform-service:${KEYCLOAK_PORT})..."
-$KUBECTL port-forward -n keycloak svc/platform-service \
-  "${PORT_FORWARD_LOCAL_PORT}:${KEYCLOAK_PORT}" >"${work_dir}/port-forward.log" 2>&1 &
-pf_pid=$!
+# --cacert is the real trust fix, not --insecure/-k. No --resolve and no
+# port-forward needed anymore (2026-09-02, platform-ingress branch) —
+# keycloak.platform.local resolves for real via the Ingress + your own
+# /etc/hosts entry (see this script's header comment), the same as any
+# other website's hostname.
+CURL=(curl -sS --fail-with-body --cacert "${work_dir}/platform-ca.crt")
+BASE_URL="https://${KEYCLOAK_HOST}"
 
-# Poll rather than a fixed sleep — port-forward is usually ready in well
-# under a second, but a fixed sleep either wastes time or isn't enough on a
-# loaded box; this waits for exactly as long as it actually takes, up to 10s.
-ready=false
-for _ in $(seq 1 20); do
-  if curl -sS -o /dev/null --connect-timeout 1 "https://127.0.0.1:${PORT_FORWARD_LOCAL_PORT}/" -k; then
-    ready=true
-    break
-  fi
-  sleep 0.5
-done
-[[ "$ready" == "true" ]] || die \
-  "Port-forward never came up — check ${work_dir}/port-forward.log (this dir is deleted on exit, \
-so rerun with 'set -x' or comment out the trap if you need to inspect it)."
-
-# --resolve sends the request to 127.0.0.1 while TLS SNI and the Host header
-# both say keycloak.platform.local — this is what satisfies Keycloak's
-# hostname provider (see this script's header comment) without touching
-# /etc/hosts. --cacert is the real trust fix, not --insecure/-k (used only
-# above, for the readiness probe, where we don't care about the cert yet).
-CURL=(curl -sS --fail-with-body
-  --resolve "${KEYCLOAK_HOST}:${PORT_FORWARD_LOCAL_PORT}:127.0.0.1"
-  --cacert "${work_dir}/platform-ca.crt")
-BASE_URL="https://${KEYCLOAK_HOST}:${PORT_FORWARD_LOCAL_PORT}"
+info "Checking ${KEYCLOAK_HOST} is actually reachable before doing anything live-mutating..."
+"${CURL[@]}" -o /dev/null "${BASE_URL}/realms/${REALM}" || die \
+  "Couldn't reach ${BASE_URL} — is the /etc/hosts entry from this script's header comment in place, \
+and is the 'keycloak-instance' Argo CD Application Synced/Healthy? \
+(sudo /usr/local/bin/kubectl -n keycloak get ingress)"
 
 info "Getting a master-realm admin token..."
 TOKEN_RESPONSE="$("${CURL[@]}" -X POST "${BASE_URL}/realms/master/protocol/openid-connect/token" \

@@ -10,10 +10,11 @@ it).
 
 Every test here constructs KeycloakAdminClient with `_client=` already set
 to a real httpx.Client pointed at a fake base_url, bypassing
-`_PortForward`/`_ResolvePatch` entirely (those two classes shell out to
-kubectl and touch real sockets — not unit-testable without a live cluster,
-same as the bootstrap script itself). That's the class's private escape
-hatch for tests, not a documented public constructor argument.
+`extract_platform_ca_cert()` entirely (that function shells out to kubectl —
+not unit-testable without a live cluster, same as the bootstrap script
+itself; see test_keycloak_connection.py for its own direct coverage,
+mocking subprocess.run). That's the class's private escape hatch for tests,
+not a documented public constructor argument.
 """
 from __future__ import annotations
 

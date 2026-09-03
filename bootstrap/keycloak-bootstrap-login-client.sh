@@ -37,12 +37,14 @@
 # (namespace cert-manager, the CA manifests/cluster-issuer.yaml issues
 # keycloak.platform.local's cert from).
 #
-# Networking: same port-forward + curl --resolve trick as
-# keycloak-bootstrap-cli-client.sh, for the same reason (Keycloak's hostname
-# provider strictly enforces keycloak.platform.local; see that script's
-# header and docs/known-issues.md). Not repeated in full detail here to avoid
-# the two copies drifting — see that script if this section needs more
-# context.
+# Networking (rewritten 2026-09-02, platform-ingress branch): same as
+# keycloak-bootstrap-cli-client.sh's own rewrite — talks straight to
+# https://keycloak.platform.local with --cacert now that a real Ingress
+# makes that hostname resolve for real, no port-forward or --resolve trick
+# needed. Same /etc/hosts requirement; see that script's header for the
+# entry to add if you haven't already. Not repeated in full detail here to
+# avoid the two copies drifting — see that script if this section needs
+# more context.
 #
 # Device-grant client fields — the one genuinely uncertain detail in this
 # script, flagged rather than silently picked (see docs/known-issues.md's
@@ -75,20 +77,14 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 KUBECTL="sudo /usr/local/bin/kubectl"
 KEYCLOAK_HOST="keycloak.platform.local"
-KEYCLOAK_PORT="8443"
 REALM="platform"
 CLIENT_ID="platform-cli-login"
-PORT_FORWARD_LOCAL_PORT="18444"   # different from keycloak-bootstrap-cli-client.sh's 18443, so both can run back-to-back without a stale forward colliding
 
 require_cmd curl
 require_cmd jq
 
 work_dir="$(mktemp -d)"
-pf_pid=""
 cleanup() {
-  if [[ -n "$pf_pid" ]]; then
-    kill "$pf_pid" >/dev/null 2>&1 || true
-  fi
   rm -rf "$work_dir"
 }
 trap cleanup EXIT
@@ -107,27 +103,16 @@ ADMIN_PASS="$($KUBECTL get secret platform-initial-admin -n keycloak -o jsonpath
   "Couldn't read platform-initial-admin's username/password — check it exists: \
 ${KUBECTL} get secret platform-initial-admin -n keycloak"
 
-info "Port-forwarding to Keycloak (127.0.0.1:${PORT_FORWARD_LOCAL_PORT} -> platform-service:${KEYCLOAK_PORT})..."
-$KUBECTL port-forward -n keycloak svc/platform-service \
-  "${PORT_FORWARD_LOCAL_PORT}:${KEYCLOAK_PORT}" >"${work_dir}/port-forward.log" 2>&1 &
-pf_pid=$!
+# No --resolve and no port-forward needed anymore (2026-09-02,
+# platform-ingress branch) — see this script's header comment.
+CURL=(curl -sS --fail-with-body --cacert "${work_dir}/platform-ca.crt")
+BASE_URL="https://${KEYCLOAK_HOST}"
 
-ready=false
-for _ in $(seq 1 20); do
-  if curl -sS -o /dev/null --connect-timeout 1 "https://127.0.0.1:${PORT_FORWARD_LOCAL_PORT}/" -k; then
-    ready=true
-    break
-  fi
-  sleep 0.5
-done
-[[ "$ready" == "true" ]] || die \
-  "Port-forward never came up — check ${work_dir}/port-forward.log (this dir is deleted on exit, \
-so rerun with 'set -x' or comment out the trap if you need to inspect it)."
-
-CURL=(curl -sS --fail-with-body
-  --resolve "${KEYCLOAK_HOST}:${PORT_FORWARD_LOCAL_PORT}:127.0.0.1"
-  --cacert "${work_dir}/platform-ca.crt")
-BASE_URL="https://${KEYCLOAK_HOST}:${PORT_FORWARD_LOCAL_PORT}"
+info "Checking ${KEYCLOAK_HOST} is actually reachable before doing anything live-mutating..."
+"${CURL[@]}" -o /dev/null "${BASE_URL}/realms/${REALM}" || die \
+  "Couldn't reach ${BASE_URL} — is the /etc/hosts entry from keycloak-bootstrap-cli-client.sh's \
+header comment in place, and is the 'keycloak-instance' Argo CD Application Synced/Healthy? \
+(sudo /usr/local/bin/kubectl -n keycloak get ingress)"
 
 info "Getting a master-realm admin token..."
 TOKEN_RESPONSE="$("${CURL[@]}" -X POST "${BASE_URL}/realms/master/protocol/openid-connect/token" \
