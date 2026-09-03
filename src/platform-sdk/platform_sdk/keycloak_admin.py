@@ -7,33 +7,26 @@ app/routers/workspaces.py docstring: membership is Keycloak-group
 territory, not catalog data, so there's nothing here for catalog-service to
 proxy or store.
 
-Why this manages its own `kubectl port-forward` and CA cert, unlike
-PlatformClient (which just expects PLATFORM_CATALOG_URL to already be
-reachable, however the caller got it there): Keycloak's hostname provider
-strictly enforces `spec.hostname.hostname: keycloak.platform.local` on every
-request once it's set — see docs/known-issues.md's 2026-08-31 entry. A plain
-port-forward to `localhost`/a raw IP doesn't satisfy it the way it does for
-catalog-service (a bare FastAPI/uvicorn app that doesn't care what Host
-header it gets); Keycloak's TLS SNI and Host header both have to say
-`keycloak.platform.local`. Fixing that by asking every caller to hand-edit
-/etc/hosts would work but is exactly what
-bootstrap/keycloak-bootstrap-cli-client.sh's own header comment already
-decided against for a ONE-TIME script — doubly true for something meant to
-run repeatedly as part of normal `platform` usage. So this class reproduces
-curl's `--resolve HOST:PORT:IP` trick in Python (temporarily patching
-`socket.getaddrinfo` for just `keycloak.platform.local`, scoped to this
-client's own lifetime and undone on close — see `_ResolvePatch` in
-`_keycloak_connection.py`) and manages its own short-lived port-forward +
-extracted CA cert the same way the bootstrap script does (`_PortForward`,
-same module). Net effect: `platform workspace invite alice --role editor`
-stays one command, not "first go start a port-forward yourself, then
-remember the right curl flags."
+Reaches Keycloak directly at `https://{host}` (2026-09-02, platform-ingress
+branch) — `keycloak.platform.local` now resolves for real, off-cluster, via
+a real `Ingress` (`src/core/argocd/manifests/keycloak-instance.yaml`) plus a
+per-device `/etc/hosts` entry, so no port-forward or hostname-resolution
+trick is needed to satisfy Keycloak's `hostname-strict` enforcement of
+`spec.hostname.hostname: keycloak.platform.local` (see
+docs/known-issues.md's 2026-08-31 entry for what that enforcement actually
+does). What this class still owns for itself: reading `platform-ca-secret`'s
+`ca.crt` via `kubectl` (`extract_platform_ca_cert()` in
+`_keycloak_connection.py`) so it can verify Keycloak's cert — self-signed,
+not in any public trust store — the same way `--cacert` does for
+`bootstrap/keycloak-bootstrap-cli-client.sh`. Net effect unchanged:
+`platform workspace invite alice --role editor` stays one command.
 
-`_PortForward`/`_ResolvePatch` moved to `_keycloak_connection.py` (2026-09-02)
-so `platform login`'s device-flow code (`keycloak_login.py`) can reuse the
-exact same mechanism instead of a second copy — see that module's own
-docstring for why gateway (the in-cluster service, unlike this CLI-side
-client) deliberately does NOT reuse it.
+Until 2026-09-02 this reached Keycloak through a `kubectl port-forward` plus
+a process-wide `socket.getaddrinfo` patch (`_PortForward`/`_ResolvePatch`,
+shared with `keycloak_login.py`) — that mechanism, and the reasoning behind
+it, is described in `_keycloak_connection.py`'s own module docstring, kept
+there rather than repeated here since it no longer applies to either
+caller.
 
 Authenticates as the `platform-cli` Keycloak client itself (client_credentials
 grant, PLATFORM_KEYCLOAK_CLIENT_SECRET from config.py) — never the master-realm
@@ -51,7 +44,7 @@ from __future__ import annotations
 
 import httpx
 
-from platform_sdk._keycloak_connection import _PortForward, _ResolvePatch
+from platform_sdk._keycloak_connection import cleanup_ca_cert, extract_platform_ca_cert
 from platform_sdk.config import SDKSettings
 from platform_sdk.exceptions import KeycloakAdminError
 from platform_sdk.models import InviteResult, Role
@@ -65,10 +58,6 @@ class KeycloakAdminClient:
         realm: str | None = None,
         client_id: str | None = None,
         client_secret: str | None = None,
-        namespace: str | None = None,
-        service_name: str | None = None,
-        service_port: int | None = None,
-        local_port: int | None = None,
         kubectl_cmd: str | None = None,
         settings: SDKSettings | None = None,
         timeout: float = 10.0,
@@ -87,14 +76,13 @@ class KeycloakAdminClient:
                 "bootstrap/keycloak-bootstrap-cli-client.sh's printed 'export' line, or read it back "
                 "with the command that script also prints if you've already run it."
             )
-        self._namespace = namespace or settings.keycloak_namespace
-        self._service_name = service_name or settings.keycloak_service_name
-        self._service_port = service_port or settings.keycloak_service_port
-        self._local_port = local_port or settings.keycloak_local_port
+        # kubectl is still needed for exactly one thing now — reading
+        # platform-ca-secret's ca.crt (extract_platform_ca_cert(), below) —
+        # not for a port-forward, since 2026-09-02's platform-ingress branch.
         self._kubectl_cmd = kubectl_cmd or settings.keycloak_kubectl_cmd
         self._timeout = timeout
         # Tests construct this with `_client` already set to a mocked
-        # httpx.Client (respx) — skips the real port-forward/getaddrinfo
+        # httpx.Client (respx) — skips the real kubectl/CA-extraction
         # plumbing entirely, same "inject a transport for tests" shape
         # PlatformClient's own tests use, just via a private constructor arg
         # instead since PlatformClient never needed one. __exit__ only tears
@@ -102,24 +90,14 @@ class KeycloakAdminClient:
         self._external_client = _client is not None
         self._client = _client
         self._token: str | None = None
-        self._port_forward: _PortForward | None = None
-        self._resolve_patch: _ResolvePatch | None = None
+        self._ca_cert_path: str | None = None
 
     def __enter__(self) -> KeycloakAdminClient:
         if self._client is None:
-            self._port_forward = _PortForward(
-                kubectl_cmd=self._kubectl_cmd,
-                namespace=self._namespace,
-                service_name=self._service_name,
-                service_port=self._service_port,
-                local_port=self._local_port,
-            )
-            ca_cert_path = self._port_forward.start()
-            self._resolve_patch = _ResolvePatch(self._host, "127.0.0.1")
-            self._resolve_patch.apply()
+            self._ca_cert_path = extract_platform_ca_cert(self._kubectl_cmd)
             self._client = httpx.Client(
-                base_url=f"https://{self._host}:{self._local_port}",
-                verify=ca_cert_path,
+                base_url=f"https://{self._host}",
+                verify=self._ca_cert_path,
                 timeout=self._timeout,
             )
         self._token = self._fetch_token()
@@ -129,12 +107,8 @@ class KeycloakAdminClient:
         if not self._external_client and self._client is not None:
             self._client.close()
             self._client = None
-        if self._resolve_patch is not None:
-            self._resolve_patch.undo()
-            self._resolve_patch = None
-        if self._port_forward is not None:
-            self._port_forward.stop()
-            self._port_forward = None
+        cleanup_ca_cert(self._ca_cert_path)
+        self._ca_cert_path = None
 
     # ---- token + low-level request plumbing ---------------------------
     def _fetch_token(self) -> str:

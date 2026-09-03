@@ -7,7 +7,7 @@ docstring).
 
 Every test here constructs KeycloakLoginFlow with `_client=` already set to
 a real httpx.Client pointed at a fake base_url, bypassing
-`_PortForward`/`_ResolvePatch` entirely — the same private test-only escape
+`extract_platform_ca_cert()` entirely — the same private test-only escape
 hatch KeycloakAdminClient's own tests use.
 
 `time.sleep` is monkeypatched to a no-op in every test that exercises the

@@ -11,12 +11,16 @@ bootstrap/keycloak-bootstrap-login-client.sh sets up — a PUBLIC client (no
 secret; see that script's header for why a public client is the right shape
 here, unlike KeycloakAdminClient's confidential service-account one).
 
-Reuses `_PortForward`/`_ResolvePatch` from `_keycloak_connection.py` — the
-exact same "port-forward + curl --resolve-equivalent" mechanism
-`KeycloakAdminClient` uses, for the identical reason (see that module's
-docstring): Keycloak's hostname provider strictly enforces
-`keycloak.platform.local` on every request, so a plain port-forward to
-localhost doesn't satisfy it.
+Connects directly to `https://{host}` (2026-09-02, platform-ingress
+branch) — `keycloak.platform.local` now resolves for real, off-cluster, via
+a real `Ingress` plus a per-device `/etc/hosts` entry, the same way any
+browser reaches it, so the verification URL Keycloak hands back is directly
+openable with no port-forward involved at all. Reuses
+`extract_platform_ca_cert()` from `_keycloak_connection.py` — same as
+`KeycloakAdminClient` — to verify Keycloak's self-signed cert; see that
+module's docstring for what this replaced (a `kubectl port-forward` plus a
+`socket.getaddrinfo` patch, needed only because nothing made
+`keycloak.platform.local` actually resolve before this branch).
 
 Poll loop follows RFC 8628 §3.5 exactly:
   - `authorization_pending` — keep polling at `interval` seconds.
@@ -42,7 +46,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
-from platform_sdk._keycloak_connection import _PortForward, _ResolvePatch
+from platform_sdk._keycloak_connection import cleanup_ca_cert, extract_platform_ca_cert
 from platform_sdk.config import SDKSettings
 from platform_sdk.exceptions import PlatformLoginError
 from platform_sdk.models import TokenSet
@@ -81,10 +85,6 @@ class KeycloakLoginFlow:
         host: str | None = None,
         realm: str | None = None,
         client_id: str | None = None,
-        namespace: str | None = None,
-        service_name: str | None = None,
-        service_port: int | None = None,
-        local_port: int | None = None,
         kubectl_cmd: str | None = None,
         settings: SDKSettings | None = None,
         timeout: float = 10.0,
@@ -94,45 +94,23 @@ class KeycloakLoginFlow:
         self._host = host or settings.keycloak_host
         self._realm = realm or settings.keycloak_realm
         self._client_id = client_id or settings.keycloak_login_client_id
-        self._namespace = namespace or settings.keycloak_namespace
-        self._service_name = service_name or settings.keycloak_service_name
-        self._service_port = service_port or settings.keycloak_service_port
-        self._local_port = local_port or settings.keycloak_login_local_port
+        # kubectl is still needed for exactly one thing now — reading
+        # platform-ca-secret's ca.crt (extract_platform_ca_cert(), below) —
+        # not for a port-forward, since 2026-09-02's platform-ingress branch.
         self._kubectl_cmd = kubectl_cmd or settings.keycloak_kubectl_cmd
         self._timeout = timeout
         # Same private test-only escape hatch as KeycloakAdminClient's own
         # `_client` arg — see that class's constructor comment.
         self._external_client = _client is not None
         self._client = _client
-        self._port_forward: _PortForward | None = None
-        self._resolve_patch: _ResolvePatch | None = None
+        self._ca_cert_path: str | None = None
 
     def __enter__(self) -> KeycloakLoginFlow:
         if self._client is None:
-            self._port_forward = _PortForward(
-                kubectl_cmd=self._kubectl_cmd,
-                namespace=self._namespace,
-                service_name=self._service_name,
-                service_port=self._service_port,
-                local_port=self._local_port,
-                # Not loopback-only, unlike KeycloakAdminClient's forward —
-                # see _PortForward's own constructor comment for the full
-                # reasoning. Bounded exposure: this forward only exists for
-                # the lifetime of one `platform login` invocation (a single
-                # human approving one login, typically under a minute), and
-                # only proxies to Keycloak's own HTTPS listener — nothing
-                # more privileged than what a browser could already reach if
-                # this cluster had its real Ingress in front of Keycloak
-                # yet. Homelab/trusted-LAN tradeoff, consistent with this
-                # repo's existing threat model (see docs/known-issues.md).
-                bind_address="0.0.0.0",
-            )
-            ca_cert_path = self._port_forward.start()
-            self._resolve_patch = _ResolvePatch(self._host, "127.0.0.1")
-            self._resolve_patch.apply()
+            self._ca_cert_path = extract_platform_ca_cert(self._kubectl_cmd)
             self._client = httpx.Client(
-                base_url=f"https://{self._host}:{self._local_port}",
-                verify=ca_cert_path,
+                base_url=f"https://{self._host}",
+                verify=self._ca_cert_path,
                 timeout=self._timeout,
             )
         return self
@@ -141,12 +119,8 @@ class KeycloakLoginFlow:
         if not self._external_client and self._client is not None:
             self._client.close()
             self._client = None
-        if self._resolve_patch is not None:
-            self._resolve_patch.undo()
-            self._resolve_patch = None
-        if self._port_forward is not None:
-            self._port_forward.stop()
-            self._port_forward = None
+        cleanup_ca_cert(self._ca_cert_path)
+        self._ca_cert_path = None
 
     # ---- step 1: get a device code -------------------------------------
     def start_device_authorization(self) -> DeviceAuthorization:

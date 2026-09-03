@@ -442,6 +442,21 @@ applies on the one machine whose hosts file you edited. Once `platform-gateway` 
 (`192.168.4.240`, from `metallb-pool.yaml`) instead of the homelab box's own address — update or
 remove this entry at that point rather than leaving it pointed at the wrong place.
 
+**Superseded, 2026-09-02 (platform-ingress branch) — confirmed live.** The predicted moment above
+arrived: a real `Ingress` now fronts Keycloak
+(`src/core/argocd/manifests/keycloak-instance.yaml`), and ingress-nginx's LoadBalancer IP came back
+exactly `192.168.4.240` as predicted. The hosts-file fix is still the right one, just pointed at
+that IP instead of the homelab box's own address, and now covers `gateway.platform.local` too
+(gateway got its own `Ingress` in the same branch):
+
+```text
+192.168.4.240  keycloak.platform.local  gateway.platform.local
+```
+
+Browsing to `https://keycloak.platform.local` (standard 443, no port) with that entry in place was
+confirmed to survive past the login page — the exact failure this entry originally documented —
+with zero `kubectl port-forward` processes running anywhere.
+
 ### `catalog-service`'s auth was a placeholder — closed at the application layer, still open at the network layer
 
 Added 2026-09-01, Phase 2 kickoff; updated 2026-09-01 (same day) when role enforcement landed;
@@ -627,6 +642,17 @@ by raw IP" entry's closing note). Consistent with this repo's existing homelab/t
 model (MetalLB's pool, no firewall by default) — flagged here rather than assumed acceptable without
 saying so.
 
+**Superseded, 2026-09-02 (platform-ingress branch).** The `bind_address`/local-port fix above was
+always framed as bridging the gap until a real Ingress existed — that Ingress now exists, and
+`KeycloakLoginFlow` no longer runs a `kubectl port-forward` at all (see
+`_keycloak_connection.py`'s module docstring for the replacement: a direct CA-pinned `httpx.Client`
+against `https://keycloak.platform.local`). The device-flow verification URL it prints now comes
+straight from Keycloak's own Ingress-facing hostname, openable from any machine with the hosts-file
+entry — no ephemeral port, no bind-address tradeoff to reason about. The `_PortForward` class this
+entry's fix and tests were about no longer exists; its regression tests were replaced with direct
+coverage of `extract_platform_ca_cert()`, the one piece of the old mechanism that's still in use
+(see `tests/test_keycloak_connection.py`).
+
 ### `platform login`'s tokens failed gateway's issuer check — same port-reflection behavior, a third symptom
 
 Found 2026-09-02, platform-gateway-auth branch, same live end-to-end pass — the third distinct
@@ -678,6 +704,17 @@ as harmless-looking leftovers, when that Ingress work lands.
 `keycloak-instance`/`gateway`, a fresh `platform login` succeeded with no "Invalid issuer" error. The
 very next call (`platform me`) immediately hit a different, previously-hidden failure — see the next
 entry.
+
+**Superseded, 2026-09-02 (platform-ingress branch), exactly as this entry predicted.** The
+`hostname-port: "18444"` pin is gone from `keycloak-instance.yaml`, replaced with
+`additionalOptions: [{name: proxy-headers, value: xforwarded}]` — Keycloak's documented reverse-proxy
+option that trusts ingress-nginx's `X-Forwarded-*` headers instead of the raw backend connection, so
+generated URLs (including every issued token's `iss`) correctly read `https://keycloak.platform.local`
+with no port. `GATEWAY_KEYCLOAK_PUBLIC_URL` dropped its `:18444` suffix to match, exactly as this
+entry said it should. Needs one more live confirmation this branch's own entries don't already
+cover: decode a token minted through the real Ingress and confirm `iss` really is
+`https://keycloak.platform.local/realms/platform` with no port — do that as part of this branch's
+live verification pass before treating this as fully closed.
 
 ### `platform me`'s first real call hit a fourth issue: PyJWT rejected a real token's `aud` claim
 
