@@ -163,3 +163,55 @@ spec:
   ports:
     - port: 8000
       targetPort: 8000
+---
+# Closes the network-layer half of docs/known-issues.md's "catalog-service's
+# auth was a placeholder" entry (2026-09-03, catalog-service-netpol branch).
+# platform-gateway-auth (2026-09-02) closed the *application-layer* gap —
+# gateway now verifies a real Keycloak JWT and derives X-Workspace/X-User/
+# X-Role itself, never trusting what a caller sends — but left this half
+# open: nothing stopped any other in-cluster pod from reaching this
+# Service's ClusterIP directly and forging those same three headers,
+# bypassing gateway entirely. This NetworkPolicy is that fix, exactly as
+# that known-issues.md entry already named it: ingress into these pods only
+# from pods in the `gateway` namespace (matched via the `kubernetes.io/
+# metadata.name` label every namespace gets automatically since k8s 1.21 —
+# nothing needs to explicitly label the `gateway` namespace for this to
+# work), restricted to the one port this Service actually exposes.
+#
+# Ingress-only on purpose (policyTypes omits Egress) — this closes exactly
+# "who can reach catalog-service," not catalog-service's own outbound
+# traffic to Postgres/DNS, which stays exactly as open as it was before.
+# k3s's bundled Network Policy controller (kube-router, alongside Flannel)
+# genuinely enforces NetworkPolicy objects on this cluster — confirmed in
+# known-issues.md already, not assumed here.
+#
+# Known risk, confirmed live rather than assumed: the readinessProbe/
+# livenessProbe above hit this same pod's port 8000 from the kubelet on its
+# own node, not from a pod in any namespace — so a namespaceSelector-only
+# rule might or might not let that traffic through depending on exactly how
+# kube-router implements the FORWARD-chain path for node-originated traffic.
+# If pods start failing readiness/liveness after this syncs, the fix is a
+# second `from` entry here, an ipBlock per cluster node's own IP as a /32
+# (from `kubectl get nodes -o wide`) — deliberately NOT a LAN-wide
+# 192.168.4.0/24 block, which would reopen this port to every device on the
+# home LAN, the exact over-broad shape this policy exists to avoid. See
+# docs/known-issues.md for what was actually needed once this deployed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: catalog-service-restrict-ingress
+  namespace: catalog-service
+spec:
+  podSelector:
+    matchLabels:
+      app: catalog-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway
+      ports:
+        - protocol: TCP
+          port: 8000
