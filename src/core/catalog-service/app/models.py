@@ -244,8 +244,19 @@ class FunctionVersion(Base):
     )
 
     id: Mapped[uuid.UUID] = _PK()
+    # ondelete="CASCADE" added 2026-09-03 (platform-function-promote branch)
+    # — found live: DELETE /functions/{id} on a published function 500'd,
+    # because Postgres rejected the delete outright (an unnamed FK defaults
+    # to NO ACTION, and app/crud.py's generic delete() doesn't catch the
+    # resulting IntegrityError). A version only means anything in the
+    # context of the function that owns it — unlike LineageEdge's source_id/
+    # target_id (this file's own module docstring covers why THOSE are
+    # allowed to dangle), there's no reason to keep orphaned version rows
+    # around once their function is gone, so cascading here is the right
+    # fix, not just a workaround. See migrations/versions/0002_* for the
+    # matching live-DB constraint change.
     function_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("functions.id"), nullable=False
+        PgUUID(as_uuid=True), ForeignKey("functions.id", ondelete="CASCADE"), nullable=False
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     signature: Mapped[str] = mapped_column(Text, nullable=False)
