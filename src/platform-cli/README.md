@@ -79,7 +79,10 @@ convention all live in `platform_cli/manifest.py`, `platform_cli/repo.py`, and
   `argocd.argoproj.io/sync-options: Delete=false` alone (ARCHITECTURE.md §3's documented default:
   reinstalling gets your data back). `--purge-data` additionally prints the `kubectl delete pvc`
   command to run yourself — platform-cli never runs it for you; it has no cluster credentials for
-  anything beyond git, and PVC deletion has no undo.
+  anything beyond git, and PVC deletion has no undo. It also prints a check to confirm the
+  module's Application is actually gone *before* you run that delete — found live (see
+  `docs/known-issues.md`) that deleting the PVC too early just gets it recreated by that
+  Application's own still-live `selfHeal`.
 
 Dependency-checking on `requires: [...]` and the Add-ons page/gateway module registry (items 6-7)
 are explicitly **not** part of this slice — see `docs/architecture/module-lifecycle-plan.md`.

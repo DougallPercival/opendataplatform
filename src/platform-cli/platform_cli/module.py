@@ -158,10 +158,29 @@ def _print_purge_command(name: str) -> None:
     # straight to the cluster, and PVC deletion has no undo — see this branch's plan file, decision
     # 4, and the AskUserQuestion this was confirmed with. The `sudo` prefix matches how cluster
     # access has actually worked in this session so far, not an assumption this command can verify.
+    #
+    # The two-step confirm-then-delete shape below (rather than just the delete command, which is
+    # what this originally printed) was added after live-verifying this exact command recreated
+    # the PVC it was trying to delete: run the delete before <name>'s own Application has actually
+    # been pruned, and that Application's still-live selfHeal recreates the PVC right back, since
+    # it's still a resource its Helm release declares. "The uninstall above has synced" can't be
+    # taken on faith — Argo's automated sync after a push has repeatedly lagged past its poll
+    # interval in live testing (docs/known-issues.md) — so this spells out how to actually confirm
+    # it first instead of just asserting it.
     typer.echo("")
-    typer.secho("--purge-data: run this yourself once the uninstall above has synced:", bold=True)
+    typer.secho("--purge-data: do NOT run the delete below yet.", bold=True, fg=typer.colors.YELLOW)
+    typer.echo(f"First confirm the {name!r} Application is really gone:")
+    typer.echo(f"  sudo kubectl -n argocd get application {name}")
+    typer.echo(
+        "That must come back NotFound before you continue. If it still shows the Application, "
+        "Argo hasn't actually synced the removal yet (this has repeatedly lagged well past its "
+        "poll interval in live testing — see docs/known-issues.md for how to force it). Deleting "
+        f"the PVC while {name!r}'s Application is still live just recreates it via that "
+        "Application's own selfHeal, which is exactly what happens if you skip this check."
+    )
+    typer.echo("")
+    typer.echo("Once it's really gone, run this yourself (platform-cli won't — no credentials, no undo):")
     typer.echo(f"  sudo kubectl delete pvc -n {name} -l platform.io/module={name}")
-    typer.echo("(platform-cli doesn't run this for you — no cluster credentials, and no undo.)")
 
 
 @app.command("scaffold")
