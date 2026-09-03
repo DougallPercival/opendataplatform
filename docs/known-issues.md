@@ -711,10 +711,14 @@ entry.
 option that trusts ingress-nginx's `X-Forwarded-*` headers instead of the raw backend connection, so
 generated URLs (including every issued token's `iss`) correctly read `https://keycloak.platform.local`
 with no port. `GATEWAY_KEYCLOAK_PUBLIC_URL` dropped its `:18444` suffix to match, exactly as this
-entry said it should. Needs one more live confirmation this branch's own entries don't already
-cover: decode a token minted through the real Ingress and confirm `iss` really is
-`https://keycloak.platform.local/realms/platform` with no port — do that as part of this branch's
-live verification pass before treating this as fully closed.
+entry said it should.
+
+**Confirmed live, 2026-09-02.** `proxy-headers: xforwarded` alone was enough — no fallback to a
+pinned `hostname-port: "443"` was needed. A fresh `platform login` through the real Ingress produced
+a token whose `iss` claim decodes to exactly `https://keycloak.platform.local/realms/platform`, no
+port. This entry, the "Reaching Keycloak by raw IP" entry, and the verification-URL entry above are
+now all fully closed — every workaround they each separately introduced is gone, replaced by the
+real Ingress doing the job all three were standing in for.
 
 ### `platform me`'s first real call hit a fourth issue: PyJWT rejected a real token's `aud` claim
 
@@ -774,6 +778,63 @@ first three all being downstream of `hostname-port` behavior no unit test could 
 real cluster. Worth remembering next time a new claim or Keycloak-specific behavior is added anywhere
 in this codebase: match what real Keycloak actually produces in test fixtures, not just what's
 convenient to construct, or the gap just moves to the next thing that touches it.
+
+### `PlatformClient` never trusted `platform-ca` — broke the moment `gateway_url` started pointing at real TLS
+
+Found 2026-09-02, platform-ingress branch, first live `platform me` after the new Ingress landed —
+two distinct bugs in the same fix, found back to back.
+
+**Bug one:** `platform_sdk/config.py`'s `gateway_url` default changed from `http://localhost:8080` (a
+plain-HTTP port-forward — no TLS involved at all) to the real `https://gateway.platform.local`
+Ingress. `PlatformClient` had never needed to verify a TLS certificate before, so its `httpx.Client`
+never pinned one — every request failed with `ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] ...
+unable to get local issuer certificate`, because gateway's Ingress cert is signed by this cluster's
+self-signed `platform-ca`, which isn't in any system trust store. `KeycloakAdminClient`/
+`KeycloakLoginFlow` had already solved exactly this problem for their own Keycloak connections
+(`extract_platform_ca_cert()` in `_keycloak_connection.py`, reading `platform-ca-secret` via
+`kubectl`) — `PlatformClient` just hadn't needed the same treatment until `gateway_url` itself became
+a real HTTPS endpoint.
+
+**Status:** fixed by giving `PlatformClient` the same CA-pinning, gated on `gateway_url` actually
+being `https://` (so the test suite's mocked `http://gateway.test` base_url — and anyone who
+deliberately points `gateway_url` back at a plain-HTTP port-forward — never touches `kubectl` at
+all).
+
+**Bug two, found immediately after deploying the first fix:** pinning the CA *eagerly*, in
+`PlatformClient.__init__`, broke `platform login` itself — `platform_cli/main.py`'s Typer callback
+constructs a `PlatformClient` unconditionally for **every** command, including `login` and `workspace
+invite`, which build their own separate `KeycloakLoginFlow`/`KeycloakAdminClient` and never send this
+one a request at all. An eager `extract_platform_ca_cert()` call in `__init__` meant `platform login`
+now failed if `kubectl` wasn't reachable at that moment — exactly backwards, since logging in is the
+one thing that shouldn't need to already be talking to gateway.
+
+**Status:** fixed by making CA extraction (and the underlying `httpx.Client` itself) lazy — built by
+a new `_ensure_http()` on the first *actual* request, the same "checked once, on first use" shape
+`_ensure_token()` already had for token refresh, not in the constructor. A command that never sends
+PlatformClient a request now never touches `kubectl` through this path either.
+
+**Confirmed live** — `platform me` and `platform workspace list` both succeeded against
+`https://gateway.platform.local` with no certificate error, and `platform login` (which never sends
+PlatformClient a request at all) confirmed unaffected by either the fix or the bug it was fixing.
+Covered by three new `test_client.py` cases: HTTPS pins the CA on first use (not construction),
+construction alone never touches `kubectl` regardless of scheme, and HTTP never touches it even on
+first use.
+
+**General lesson, same shape as this session's other four:** a working default (`http://localhost:8080`,
+no TLS) quietly hid a requirement (CA trust) that only became real once the default changed to
+something with actual TLS — nothing about `PlatformClient`'s own code was wrong until the ground it
+stood on moved. Worth remembering whenever a URL-shaped default changes scheme, not just host: check
+what trust assumptions that default was implicitly satisfying before.
+
+**The platform-ingress plan's full live verification is now complete**, this bug included — every
+item in the plan's Verification section is checked off against the real cluster: both `Application`s
+Synced/Healthy after the manifest edits, ingress-nginx's LoadBalancer IP confirmed exactly
+`192.168.4.240` as predicted, `https://keycloak.platform.local` surviving past the login page with
+zero `kubectl port-forward` processes running, a freshly issued token's port-free `iss`, `platform
+login` → `platform me` → `platform workspace list` all working end to end against the real Ingress
+hostnames, and both bootstrap scripts rerunning cleanly with their port-forward blocks gone. The one
+thing not in the original plan — `PlatformClient`'s own CA trust — surfaced live exactly the way this
+file's other entries did, and is fixed and tested the same way.
 
 ### GHCR packages default to private on first publish — one manual step after `ci.yml`'s first push
 
