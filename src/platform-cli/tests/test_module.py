@@ -290,6 +290,24 @@ def test_uninstall_purge_data_prints_kubectl_command(git_repo):
     assert "kubectl delete pvc -n hello -l platform.io/module=hello" in result.output
 
 
+def test_uninstall_purge_data_warns_to_confirm_application_gone_first(git_repo):
+    # Regression test for a real bug found live 2026-09-03 (this branch's own live verification):
+    # running the printed delete command before Argo had actually pruned the module's Application
+    # got the PVC recreated by that Application's own still-live selfHeal. The printed guidance
+    # must tell the operator to check first, not just hand them the delete command — and the check
+    # must come before the delete in the output, not after.
+    repo_root, _ = git_repo
+    _install(repo_root, "hello")
+
+    result = runner.invoke(app, ["uninstall", "hello", "--purge-data"])
+    assert result.exit_code == 0, result.output
+    assert "do NOT run the delete below yet" in result.output
+    assert "kubectl -n argocd get application hello" in result.output
+    check_pos = result.output.index("kubectl -n argocd get application hello")
+    delete_pos = result.output.index("kubectl delete pvc -n hello -l platform.io/module=hello")
+    assert check_pos < delete_pos, "the confirm-it's-gone check must print before the delete command"
+
+
 def test_uninstall_dry_run_changes_nothing(git_repo):
     repo_root, _ = git_repo
     _install(repo_root, "hello")

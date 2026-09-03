@@ -553,6 +553,22 @@ were actually gone.
 
 ### A merged fix to `catalog-service`'s Python source doesn't deploy itself — Argo CD only diffs the tracked manifest
 
+**Update, 2026-09-03, `platform-module-lifecycle` branch:** the lesson below turned out to be
+narrower than it needed to be. It was written assuming the failure mode was specific to
+`PreSync`/`PostSync` hooks (which really do have that extra "only created during a sync operation"
+wrinkle) — but live-verifying this branch's `modules-root`/`hello-module` install-uninstall-reinstall
+cycle hit the *same symptom* three separate times against **plain, non-hook resources**: a brand
+new `Application` (`modules-root.yaml` itself, then `hello-module`'s generated Application) simply
+didn't exist in the cluster minutes after being pushed, and once `argocd.argoproj.io/refresh=hard`
+alone wasn't enough, the `.operation`-patch trick below was what actually made it appear. Same for
+pruning `hello-module` back out on uninstall. **Generalized lesson: don't assume "pushed to git"
+means "Argo has acted on it" for *any* change, hook or not** — this cluster's automated-sync poll
+interval has repeatedly lagged noticeably in live testing, and `refresh=hard` only recomputes the
+diff, it doesn't reliably force the controller to execute a sync operation on what it finds. Check
+for the real effect (a resource that should now exist or be gone, not just a `status.sync.revision`
+match) before concluding something didn't work, and reach for the `.operation` patch as the default
+"make Argo actually do the thing now" tool, not a hook-specific special case.
+
 Added 2026-09-03, `platform-function-promote` branch, discovered while trying to verify the fix
 above live. Merging this branch's `catalog-service` changes (the model fix, the new Alembic
 migration) into `dev` and confirming `git log` on `homelab-dev` matched `origin/dev` was **not**
@@ -597,6 +613,36 @@ didn't change, nothing will prompt Argo to re-sync on its own — check whether 
 happened (a fresh `PreSync` Job `AGE`, not just a matching `status.sync.revision`) before trusting
 that a live verification is testing the new code at all, and use the `.operation` patch above to
 force one when it didn't.
+
+### `platform module uninstall --purge-data` run too early recreates the PVC it's trying to delete
+
+Added 2026-09-03, `platform-module-lifecycle` branch, found live verifying `hello-module`'s
+install/uninstall/reinstall/purge-data cycle end to end. Sequence that broke: run `platform module
+uninstall hello-module --purge-data`, then immediately run the `kubectl delete pvc ...` command it
+prints. The PVC came right back — `kubectl get pvc` showed it existing again seconds later with a
+fresh `AGE`.
+
+Root cause: at the moment the PVC was deleted, `hello-module`'s own `Application` object hadn't
+actually been pruned yet — Argo's automated sync after the `uninstall` push hadn't run yet (the
+same repoll-lag pattern the entry above generalizes). While that `Application`'s Helm release is
+still live, its own `syncPolicy.automated.selfHeal` reconciles every resource its chart declares,
+PVC included — deleting a resource that release still owns just gets it recreated on the spot, the
+exact same mechanism that makes a plain `uninstall` (no flag) leave the PVC alone on purpose
+(`argocd.argoproj.io/sync-options: Delete=false`) — except here it's the *wrong* resource being
+protected, because the Application managing it hasn't actually gone away yet.
+
+**Fix, shipped in this same branch:** `platform_cli/module.py`'s `_print_purge_command` no longer
+just prints the delete command — it now prints an explicit "do NOT run this yet" warning plus the
+exact `kubectl -n argocd get application <name>` check to confirm the Application is really gone
+(and how to force it via the `.operation` patch above if it isn't) before the delete command. This
+doesn't make the underlying Argo lag go away, but it stops the CLI's own guidance from implying
+"the uninstall above has synced" is something you can just take on faith, which is exactly what led
+to this the first time.
+
+**If you hit this anyway** (recreated PVC after a purge-data delete): re-confirm the Application is
+gone (`kubectl -n argocd get application <name>` → `NotFound`), then re-run the delete. Nothing
+about this is unrecoverable — the PVC just needs deleting again once its owning Application
+actually isn't there to recreate it.
 
 ### `platform-cli-login`'s device-grant fields — one Keycloak-version detail confirmed only at bootstrap-script-run time
 
