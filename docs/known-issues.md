@@ -546,6 +546,58 @@ version_num` column is `VARCHAR(32)`, so that id failed migration-time with a
 `StringDataRightTruncation` `DataError`, not at authoring time. Keep future revision ids under 32
 characters; `0001_initial_schema`'s 19-character id happened to never test this boundary.
 
+**Confirmed live, 2026-09-03**, after working through the deployment gotcha in the entry directly
+below this one: `platform function delete` on a freshly published function succeeded, and a second
+`platform function list` confirmed it (and the two leftover test functions from the earlier 500s)
+were actually gone.
+
+### A merged fix to `catalog-service`'s Python source doesn't deploy itself — Argo CD only diffs the tracked manifest
+
+Added 2026-09-03, `platform-function-promote` branch, discovered while trying to verify the fix
+above live. Merging this branch's `catalog-service` changes (the model fix, the new Alembic
+migration) into `dev` and confirming `git log` on `homelab-dev` matched `origin/dev` was **not**
+enough to make `platform function delete` actually work — it kept 500ing even after the merge.
+
+Root cause: `apps/core/catalog-service.yaml`'s `Application` only tracks
+`manifests/catalog-service.yaml` — the Job/Deployment/Service *shape*. This branch never touched
+that file (no reason to; nothing about the Kubernetes objects themselves changed), so Argo CD saw
+zero diff and never scheduled a real sync operation. The `catalog-service-migrate` Job is a
+`PreSync` hook, and hooks only execute *during* a sync operation — with nothing to sync, the Job
+that had run hours earlier (before this branch existed) just sat there, `Complete`, stale, having
+never seen the new code or the new migration at all.
+
+Two more things learned working through it, in order tried:
+
+1. **`kubectl annotate application ... argocd.argoproj.io/refresh=hard`** only forces Argo to
+   re-diff against git — it does not force a sync operation when the diff comes back empty. Confirmed
+   the `Application`'s `status.sync.revision` matched the merge commit even before any of this, which
+   is exactly why this looked deceptively "already synced."
+2. **Deleting the stale Job and waiting for `syncPolicy.automated.selfHeal` to recreate it does NOT
+   work** — `selfHeal` reconciles normal managed resources, but hook resources (`PreSync`/`PostSync`)
+   are only created during a sync operation's hook phase, not continuously reconciled the way a
+   Deployment or Service is. A deleted hook just stays deleted until the next real sync.
+
+**What actually worked**, with no `argocd` CLI installed on `homelab-dev`: writing directly to the
+`Application`'s `.operation` field, which is exactly what `argocd app sync` does under the hood —
+
+```bash
+sudo /usr/local/bin/kubectl -n argocd patch application catalog-service --type merge \
+  -p '{"operation":{"sync":{"revision":"HEAD","prune":true}}}'
+```
+
+This forced a real sync regardless of the (empty) manifest diff, which re-ran the `PreSync` hook,
+which pulled the current `:dev` image (already rebuilt by CI off the merge commit — confirmed by the
+migration log finally showing `Running upgrade 0001_initial_schema -> 0002_function_versions_cascade`
+instead of just Alembic's context-setup lines) and applied the migration for real.
+
+**General lesson, worth remembering for any future branch that changes a service's Python source
+(models, routers, migrations) without also touching its `argocd/manifests/*.yaml`:** a merge to
+`dev` alone does not guarantee the new code is actually running in the cluster. If the K8s manifest
+didn't change, nothing will prompt Argo to re-sync on its own — check whether a real sync actually
+happened (a fresh `PreSync` Job `AGE`, not just a matching `status.sync.revision`) before trusting
+that a live verification is testing the new code at all, and use the `.operation` patch above to
+force one when it didn't.
+
 ### `platform-cli-login`'s device-grant fields — one Keycloak-version detail confirmed only at bootstrap-script-run time
 
 Added 2026-09-02, platform-gateway-auth branch. `bootstrap/keycloak-bootstrap-login-client.sh`
