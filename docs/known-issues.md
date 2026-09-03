@@ -457,7 +457,7 @@ Browsing to `https://keycloak.platform.local` (standard 443, no port) with that 
 confirmed to survive past the login page — the exact failure this entry originally documented —
 with zero `kubectl port-forward` processes running anywhere.
 
-### `catalog-service`'s auth was a placeholder — closed at the application layer, still open at the network layer
+### `catalog-service`'s auth was a placeholder — closed at both the application and network layers
 
 Added 2026-09-01, Phase 2 kickoff; updated 2026-09-01 (same day) when role enforcement landed;
 **updated again 2026-09-02 (platform-gateway-auth branch) — the application-layer half of this gap
@@ -486,10 +486,28 @@ branch. A `NetworkPolicy` in `catalog-service`'s namespace allowing ingress only
 `gateway` namespace (matched by namespace label, e.g. `kubernetes.io/metadata.name: gateway`) would
 close it.
 
-**Status:** application-layer gap closed by this branch. **Do not** put `catalog-service` behind an
-`Ingress`, a `LoadBalancer` Service, or anything else reachable off-cluster until the NetworkPolicy
-above exists too — today "anyone who can reach it" is still "any pod on this cluster," not yet
-narrowed to "anyone who went through gateway."
+**Status:** application-layer gap closed by `platform-gateway-auth`. **Network-layer gap also closed,
+2026-09-03 (`catalog-service-netpol` branch) — confirmed live.** `manifests/catalog-service.yaml`
+now carries a `NetworkPolicy` (`catalog-service-restrict-ingress`) restricting ingress on
+catalog-service's pods to the `gateway` namespace only, on port 8000 — exactly the shape this entry
+named above, `namespaceSelector: kubernetes.io/metadata.name: gateway`, no explicit namespace
+labeling needed.
+
+Live verification, in order: the `catalog-service` Application stayed Synced/Healthy through the
+sync; the decision-4-style kubelet-probe risk this design carried (readinessProbe/livenessProbe hit
+the pod from the kubelet on its own node, not from a pod in any namespace, so a namespaceSelector-only
+rule might not have matched that traffic) turned out to be a non-issue on this cluster's k3s/
+kube-router combination — `RESTARTS` stayed at `0`, `READY` stayed `1/1`, zero new Pod Events, for a
+full minute-plus after the policy landed. No `ipBlock`/node-IP fallback was needed. `platform dataset
+list` through gateway kept working unchanged, confirming the allowed path. And the actual proof: a
+throwaway pod started in the `keycloak` namespace (deliberately *not* `gateway`) got `Connection
+refused` curling `catalog-service.catalog-service.svc.cluster.local:8000` directly — the exact
+in-cluster bypass this whole entry was about, now closed.
+
+**Do not** put `catalog-service` behind an `Ingress`, a `LoadBalancer` Service, or anything else
+reachable off-cluster — that was never in scope and stays out of scope; catalog-service's only front
+door is, and remains, gateway. This entry is now fully resolved: both the application-layer and
+network-layer halves of "anyone who can reach it" are narrowed to "anyone who went through gateway."
 
 ### `platform-cli-login`'s device-grant fields — one Keycloak-version detail confirmed only at bootstrap-script-run time
 
