@@ -31,3 +31,10 @@ Thumbs.db
 # Helm
 charts/**/charts/
 charts/**/*.tgz
+
+# Node / ui-shell (feature/ui-shell-scaffold, 2026-09-04) — .env.local and friends are already
+# covered by the .env.* pattern above, not duplicated here.
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/

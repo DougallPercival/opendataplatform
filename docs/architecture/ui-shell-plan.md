@@ -58,6 +58,11 @@ section to point at.
    `argocd/README.md`'s own section on this); and a new `ci.yml` path-filter + test + build-and-push
    job set, mirroring gateway's exactly. No backend calls, no auth, no nav data — just prove
    git push → CI build → Argo deploy → reachable over Ingress with a static placeholder page.
+
+   **✅ Built, 2026-09-04 (feature/ui-shell-scaffold branch)** — see `src/core/ui-shell/README.md`
+   for the full writeup. React+TS+Vite scaffold, multi-stage Docker image, `ui-shell.yaml`/
+   `apps/core/ui-shell.yaml` at sync wave 4, `ci.yml`'s `test-ui-shell`/`build-and-push-ui-shell`
+   pair. Still just a static placeholder page — items 2-8 below remain fully open.
 2. **Resolve the same-origin question.** The original design already assumes gateway proxies
    ui-shell in-cluster so the browser never needs CORS (`.env.example`'s own comment) — but gateway's
    proxy today (`app/proxy.py`) forwards to catalog-service only, one fixed `httpx.AsyncClient` built

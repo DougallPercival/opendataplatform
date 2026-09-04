@@ -5,7 +5,11 @@
 # `gateway` (platform-gateway-auth branch, 2026-09-02) joined as a fourth
 # path/package — build+push like catalog-service (it's a container image
 # too), wired the same way that one was: a paths-filter output, a
-# test-<pkg> job, a build-and-push-<pkg> job. The full path-filtered matrix
+# test-<pkg> job, a build-and-push-<pkg> job. `ui-shell` (feature/ui-shell-
+# scaffold, 2026-09-04) joined as a fifth the same way — Node/npm instead of
+# pip, `npm run build` standing in for a real test suite since there's
+# nothing to unit-test in a static placeholder page yet (see that package's
+# own README). The full path-filtered matrix
 # ARCHITECTURE.md §10 and CONTRIBUTING.md describe (markdownlint, yamllint,
 # shellcheck, hadolint, helm lint) is still aspirational — add those jobs as
 # the pieces they'd actually check show up, same "don't build what the
@@ -21,6 +25,7 @@ on:
     paths:
       - "src/core/catalog-service/**"
       - "src/core/gateway/**"
+      - "src/core/ui-shell/**"
       - "src/platform-sdk/**"
       - "src/platform-cli/**"
       - ".github/workflows/ci.yml"
@@ -29,6 +34,7 @@ on:
     paths:
       - "src/core/catalog-service/**"
       - "src/core/gateway/**"
+      - "src/core/ui-shell/**"
       - "src/platform-sdk/**"
       - "src/platform-cli/**"
       - ".github/workflows/ci.yml"
@@ -56,6 +62,7 @@ jobs:
     outputs:
       catalog_service: ${{ steps.filter.outputs.catalog_service }}
       gateway: ${{ steps.filter.outputs.gateway }}
+      ui_shell: ${{ steps.filter.outputs.ui_shell }}
       platform_packages: ${{ steps.filter.outputs.platform_packages }}
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +75,9 @@ jobs:
               - '.github/workflows/ci.yml'
             gateway:
               - 'src/core/gateway/**'
+              - '.github/workflows/ci.yml'
+            ui_shell:
+              - 'src/core/ui-shell/**'
               - '.github/workflows/ci.yml'
             platform_packages:
               - 'src/platform-sdk/**'
@@ -253,6 +263,74 @@ jobs:
           # component) and isn't repeated here to avoid the two copies
           # drifting apart; this is the same bug, already fixed once, reused
           # rather than risking reintroducing it.
+          tags: >-
+            ${{ github.event_name == 'push'
+            && format('{0}:{1}', env.IMAGE_NAME, github.ref_name)
+            || format('{0}:pr-{1}', env.IMAGE_NAME, github.event.pull_request.number) }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/DougallPercival/opendataplatform
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test-ui-shell:
+    name: Test ui-shell
+    needs: changes
+    if: needs.changes.outputs.ui_shell == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/core/ui-shell
+    # No Vitest yet — this branch is a static placeholder page (see
+    # ui-shell-plan.md item 1 and this package's own README), nothing
+    # meaningful to unit-test. `npm run build` (tsc -b && vite build)
+    # succeeding is the right stand-in signal for this slice, the same role
+    # `ruff check` + `pytest` play for the Python services above but scoped
+    # to what actually exists today. Add a real test job once item 5 (real
+    # nav) introduces something worth exercising.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/core/ui-shell/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  build-and-push-ui-shell:
+    name: Build & push ui-shell image
+    needs: [changes, test-ui-shell]
+    # Same "written out explicitly, even though it's redundant with the
+    # skipped-dependency cascade" reasoning as build-and-push's own
+    # identical comment above.
+    if: needs.changes.outputs.ui_shell == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # Same hardcoded-lowercase reasoning as build-and-push's IMAGE_NAME
+      # above — see that job's own comment.
+      IMAGE_NAME: ghcr.io/dougallpercival/ui-shell
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: src/core/ui-shell
+          push: ${{ github.event_name == 'push' }}
+          # Identical ternary to build-and-push's own `tags:` above, copied
+          # verbatim rather than re-derived — see that job's own long
+          # comment for why a bare `github.ref_name` breaks on a
+          # pull_request event.
           tags: >-
             ${{ github.event_name == 'push'
             && format('{0}:{1}', env.IMAGE_NAME, github.ref_name)
