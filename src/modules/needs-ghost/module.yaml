@@ -14,7 +14,7 @@ healthCheck: /healthz
 # way, so `platform module install` would block forever waiting for an Application that will never
 # exist. Leave this empty unless this module genuinely depends on another module being installed
 # and healthy first — e.g. requires: [hello-module]. `--skip-requires-check` bypasses this check.
-requires: []
+requires: [totally-not-a-real-module]
 optional: true
 # Argo CD Application destination.namespace for this module, per `platform_cli/manifest.py`'s
 # ModuleManifest — additive over what ARCHITECTURE.md §3's example module.yaml shows, since
