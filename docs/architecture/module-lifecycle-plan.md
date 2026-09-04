@@ -147,9 +147,8 @@ deleted, so the reasoning stays visible next to the question it answers:
 - ~~The machine-readable "what does this module own" convention `--purge-data` needs (item 4)~~ —
   **resolved for v1, PVC-only**: a `platform.io/module: <id>` label plus an
   `argocd.argoproj.io/sync-options: Delete=false` annotation on every PVC a module's chart creates
-  (`src/charts/hello-module/templates/pvc.yaml`). Bucket/schema ownership is **still open** —
-  deliberately out of scope for this slice, same "PVCs only this pass" scoping the branch that
-  built this settled on.
+  (`src/charts/hello-module/templates/pvc.yaml`). Bucket/schema ownership is a separate, harder
+  problem, not a smaller version of this same answer — see "Bucket/schema data ownership" below.
 - ~~`module.yaml` validation's exact failure mode (item 2)~~ — **resolved**: rejected at both
   `scaffold`-time (a bad module *name*, not module.yaml content, since scaffold generates the file)
   and `install`-time (a bad module.yaml, including unknown fields — `ModuleManifest`'s
@@ -162,8 +161,58 @@ Resolved by the platform-module-deps branch (2026-09-03):
 
 Still open, unresolved by either branch — item 7's own scope:
 
-- The bucket/schema half of `--purge-data`'s data-ownership convention (see above).
 - Everything in item 7: gateway's module registry, the Add-ons page, `ui-shell` (including the
   static `modules/*/module.yaml` index the Add-ons page will need to list modules that *aren't*
   installed yet — item 6's live-Argo-CD-query approach deliberately didn't need that index, but
   item 7 still will).
+
+### Bucket/schema data ownership for `--purge-data` — informed deferral (2026-09-04, docs-only pass)
+
+Split out from item 4's bullet above because research this pass (a docs-only branch — no code
+changed) found it isn't a smaller version of the same answer: PVC ownership had a real convention
+to mirror, this doesn't, and the two halves of "bucket/schema" turned out to be two structurally
+different problems, not one.
+
+**What "schema" actually meant here, clarified:** shorthand for "a module's own Postgres
+database," not a literal SQL `CREATE SCHEMA` — no per-module, or even per-workspace, real SQL
+schema convention exists anywhere in this repo (a repo-wide grep for `CREATE SCHEMA`/`search_path`
+returns nothing). ARCHITECTURE.md §4's tenancy table describes "Postgres schema |
+`<workspace>.*` tables" as the workspace-isolation mechanism, but the real implementation
+(catalog-service) uses one whole database with a `workspace_id` column instead — a separate,
+pre-existing gap in the workspace tenancy model, not something this pass resolves either.
+
+**Postgres (module-owned database):** CNPG's `Database` CRD is real, already used by
+catalog-service (`src/core/argocd/manifests/catalog-database.yaml` — `name: catalog`, `owner:
+catalog`, `cluster: {name: platform-postgres}`, `databaseReclaimPolicy: retain`), namespaced, and
+in principle just as label-selectable/deletable as a PVC — `metadata.labels: {platform.io/module:
+<id>}` plus `kubectl delete database -n postgres -l platform.io/module=<id>` would mirror the PVC
+UX exactly. But two real wrinkles PVC never had: (1) a `Database` CR must live in the *same*
+namespace as the CNPG `Cluster` it targets — `postgres`, per `postgres-cluster.yaml` — so a
+module's own chart would have to write into a shared namespace it doesn't own, something no module
+manifest does today (every module only ever gets `CreateNamespace=true` into its own namespace);
+(2) `databaseReclaimPolicy` is CNPG's own field, not an Argo CD sync-option like PVC's
+`Delete=false` — `retain` (the only value used anywhere in this repo today) means deleting the CR
+does *not* drop the database, so a `--purge-data`-style printed delete command would only actually
+work if the policy were `delete`, a distinction PVC's convention doesn't have to make.
+
+**Buckets:** SeaweedFS is a real, deployed core service (`storage-seaweedfs`), but the only thing
+that creates a bucket today is `postgres-backup.yaml`'s own Job — a hand-rolled `aws s3 mb` against
+SeaweedFS's S3-compatible endpoint (confirmed: this repo's SeaweedFS deployment runs S3-gateway
+only, no CRD/operator mode). There is **no Kubernetes object representing a bucket at all** — unlike
+a PVC or a CNPG `Database`, nothing exists to attach a `platform.io/module` label to. A module
+wanting bucket ownership tracked would need a synthetic marker object invented purely for this
+(e.g. a labeled `ConfigMap` recording the bucket name), which is a real design decision with zero
+precedent anywhere in this repo — not a mechanical extension of anything that exists.
+
+**Why this stays deferred rather than built now:** neither storage type has a real consumer today
+(`hello-module` is stateless nginx with one throwaway PVC; no module needs a database or a bucket
+yet), and the two problems don't share a solution the way "extend the PVC label to two more
+resource types" implied. A future implementation needs to decide, concretely: whether module
+Applications get cross-namespace write permission into `postgres` (and what that does to the
+one-namespace-per-module isolation model every other module manifest assumes today); what shape a
+bucket-marker convention takes if built, and who's actually responsible for creating/deleting the
+bucket itself (still nobody, today — even catalog-service's own bucket is a hand-rolled Job, not a
+generic mechanism a module could reuse). Same "properly scope, don't bundle" call this doc has made
+twice already (function-promote vs. module-lifecycle; items 6 vs. 7) — the difference here is the
+smaller half doesn't get built at all this pass, just written down accurately so whoever picks this
+up next isn't re-deriving this research from scratch.
