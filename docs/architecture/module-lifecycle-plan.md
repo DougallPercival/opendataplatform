@@ -98,7 +98,11 @@ Each item names the ARCHITECTURE.md section that already specifies its design, w
    built yet" section already names the registry/nav-aggregation/Add-ons-page piece as future work,
    and `ui-shell` doesn't exist as a directory at all yet (there's nothing to serve nav *to*). Needed
    for the Add-ons-page door specifically — the CLI door (item 4) and the git door (committing
-   straight into `modules-enabled/` by hand) don't depend on either of these.
+   straight into `modules-enabled/` by hand) don't depend on either of these. **Scoped in full,
+   2026-09-04 (docs/ui-shell-plan branch): see `docs/architecture/ui-shell-plan.md`** — item 7 turned
+   out to be several separate subsystems (frontend stack choice, browser OAuth, a static release-time
+   module index, a git-push-credentials trust-boundary question, reverse-proxying into module UIs),
+   not one bullet's worth of work, the same discovery that split items 6/7 apart in the first place.
 
 ## Recommended first slice
 
