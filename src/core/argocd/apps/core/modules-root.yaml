@@ -22,6 +22,18 @@
 # file per installed module (module.yaml lives in modules/<name>/ instead, which this Application
 # never looks at directly), so there's nothing to recurse into.
 #
+# `AllowEmpty=true` (fix/modules-root-allow-empty-sync, 2026-09-08) — found live: with zero modules
+# installed, modules-enabled/ holds only its own README.md, so this Application's target state
+# resolves to zero child Applications. Argo CD's default safety guard refuses to auto-sync when a
+# directory source resolves to nothing, specifically to avoid an accidental repo/path mistake
+# silently wiping out everything a directory-sourced app manages — but "no modules installed" is a
+# completely ordinary, expected state here, not a mistake. Without this flag, that guard doesn't
+# just skip one sync attempt: it permanently freezes THIS Application every time the last module
+# gets uninstalled, which also means it stops pruning anything else in modules-enabled/ from then
+# on. See docs/known-issues.md's "modules-root silently stops syncing once the last module is
+# uninstalled" entry for how this was actually found (two real orphaned Deployments left running
+# for 4+ days) and confirmed fixed.
+#
 # Wave 5, one after gateway (wave 4) — modules commonly declare `requires: [auth, catalog]` in
 # their own module.yaml (ARCHITECTURE.md §3's own notebook-jupyterhub example), so it's worth core
 # being fully up before Argo CD starts trying to reconcile whatever's in modules-enabled/. Not
@@ -64,3 +76,4 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - AllowEmpty=true
