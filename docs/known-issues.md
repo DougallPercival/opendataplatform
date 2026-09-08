@@ -1144,6 +1144,43 @@ the next time every module gets uninstalled — untested against a *second* real
 cycle on this cluster (nothing to uninstall from at the time this was fixed), but this is Argo CD's
 own documented mechanism for exactly this guard, not a workaround this repo invented.
 
+**Follow-up, same day (2026-09-08) — the untested case above got tested, and `AllowEmpty=true` alone
+turned out not to be enough.** Verifying `feature/gateway-module-registry` live meant installing then
+immediately uninstalling `hello-module` — a real single-module-to-empty transition, the exact case
+left untested above. `modules-root` hit the *identical* `SyncError` again
+(`"Skipping sync attempt to [<uninstall commit sha>]: auto-sync will wipe out all resources"`) even
+though `kubectl -n argocd get application modules-root -o jsonpath='{.spec.syncPolicy.syncOptions}'`
+confirmed `AllowEmpty=true` was genuinely present in the live spec — this was not a case of the fix
+having failed to deploy.
+
+**What this means:** `AllowEmpty=true` prevents the *permanently stuck* failure mode this entry was
+originally written for (the guard no longer freezes `modules-root` forever, and a later, unrelated
+push can still trigger a fresh comparison) — but it does not appear to make Argo CD's **automated
+self-heal** sync path perform the actual non-empty→empty prune on its own. One explicit, manually-
+triggered sync was what actually got it unstuck this time, the exact same `.operation`-patch
+mechanism the "`platform module uninstall --purge-data`" and "A merged fix ... doesn't deploy
+itself" entries above already document as the general "make Argo actually do the thing now" tool for
+a stalled automated sync:
+
+```bash
+sudo kubectl -n argocd patch application modules-root --type merge \
+  -p '{"operation":{"initiatedBy":{"username":"<your-username>"},"sync":{"prune":true}}}'
+```
+
+**Confirmed live, 2026-09-08:** this single manual sync immediately flipped `modules-root` to
+`Synced`/`Healthy` and pruned `hello-module`'s `Application` (and its Deployment/Service/Pod
+underneath, via that Application's own cascade-delete finalizer) cleanly —
+`kubectl -n argocd get applications -l platform.io/tier=module` came back empty right after.
+
+**Status:** `AllowEmpty=true` stays correct and necessary (without it, this state is permanently
+stuck rather than one manual sync away from resolved) — this isn't a reason to revert or replace it.
+Treat "uninstalled the last remaining module" as needing one manual `.operation`-patch sync every
+time it happens, not something that resolves itself on `modules-root`'s own automated schedule.
+Worth a real fix at the code level if this recurs often enough to be annoying (e.g. `bootstrap/`
+tooling or `platform module uninstall` itself detecting "this was the last module" and triggering the
+sync automatically) — not done here, since this branch's actual scope was the gateway module
+registry, not `modules-root`'s sync behavior a second time.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a
