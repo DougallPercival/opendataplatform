@@ -64,14 +64,18 @@
 # defeating the entire reason this client exists as its own browser-shaped
 # client rather than reusing platform-cli-login's.
 #
-# post.logout.redirect.uris — the one genuinely uncertain detail in this
-# script, flagged rather than silently assumed (same discipline as
-# keycloak-bootstrap-login-client.sh's device-grant-field callout, which
-# really did turn out to need a fallback on this cluster's 26.7.2 Operator).
-# This is the standard OIDC RP-initiated-logout attribute Keycloak has
-# supported since well before 26.7.2, so it should just work — but confirm
-# on the first real `platform-ui-shell` logout and add a
-# docs/known-issues.md entry either way (working as expected, or not).
+# post.logout.redirect.uris — confirmed live on this cluster's 26.7.2
+# Operator (same "flag genuinely uncertain details, don't silently assume"
+# discipline as keycloak-bootstrap-login-client.sh's device-grant-field
+# callout, which also turned out to need a fix). The attribute itself is the
+# standard OIDC RP-initiated-logout mechanism, but Keycloak's client
+# `attributes` map only holds ONE string per key — a multi-valued attribute
+# like this one is encoded as its values joined with a literal "##", NOT a
+# space or comma. A space-joined value here is silently mis-parsed as ONE
+# URI containing a space, and Keycloak's client-creation POST rejects it
+# outright: `{"error":"invalid_input","error_description":"A post-logout
+# redirect URI is not a valid URI"}`. Caught live on the first real run of
+# this script (2026-09-08) — see docs/known-issues.md for the write-up.
 #
 # Needs `git update-index --chmod=+x bootstrap/keycloak-bootstrap-ui-shell-client.sh`
 # after its first commit — see docs/known-issues.md's entry on bootstrap
@@ -164,7 +168,7 @@ no service account, no secret)..."
       webOrigins: [$deployedOrigin, $localOrigin],
       attributes: {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": ($deployedLogout + " " + $localLogout)
+        "post.logout.redirect.uris": ($deployedLogout + "##" + $localLogout)
       }
     }')"
 

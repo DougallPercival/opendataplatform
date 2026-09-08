@@ -1181,6 +1181,40 @@ tooling or `platform module uninstall` itself detecting "this was the last modul
 sync automatically) — not done here, since this branch's actual scope was the gateway module
 registry, not `modules-root`'s sync behavior a second time.
 
+### `keycloak-bootstrap-ui-shell-client.sh`'s `post.logout.redirect.uris` — multi-valued client attributes need `##`, not a space
+
+Added 2026-09-08, feature/ui-shell-oauth branch. Same "flag a genuinely uncertain Keycloak-version
+detail rather than silently assume it" discipline as the `platform-cli-login` device-grant-field
+entry above — this one turned out to need a real fix, not just a confirmation.
+
+`post.logout.redirect.uris` is a standard OIDC RP-initiated-logout client attribute, and this
+script registers two values for it (the deployed origin's `/*` and `localhost:5173`'s `/*`, mirroring
+the two registered `redirectUris`). The first draft joined them with a plain space:
+`"${DEPLOYED_ORIGIN}/* ${LOCAL_DEV_ORIGIN}/*"`.
+
+Keycloak's `ClientRepresentation.attributes` is a flat map of one string per key — there's no native
+array shape for an attribute value. For the handful of attributes (like this one) that are genuinely
+multi-valued, Keycloak's own client code joins/splits them internally on a literal `##` separator, not
+a space or comma. A space-joined value isn't split into two URIs at all — it's parsed as *one* URI
+containing a literal space character, which fails URI validation outright.
+
+**Confirmed live, first real run against `homelab-dev`'s 26.7.2 Operator, 2026-09-08:** client
+creation 400'd immediately —
+
+```json
+{"error":"invalid_input","error_description":"A post-logout redirect URI is not a valid URI"}
+```
+
+**Fix:** join with `"##"` instead of `" "` —
+`"post.logout.redirect.uris": ($deployedLogout + "##" + $localLogout)`. Re-run confirmed clean:
+client created, both post-logout redirect URIs present and individually valid.
+
+**Status:** fixed in the script itself (not a workaround to remember) — this entry exists so a future
+reader who sees a similar "not a valid URI" error on some *other* multi-valued Keycloak client
+attribute (e.g. `request.uris`, `web.origins` when set via the attributes map instead of the
+top-level field) recognizes the `##`-separator pattern immediately instead of re-diagnosing it from
+scratch.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a
