@@ -101,6 +101,17 @@ section to point at.
    exactly like a `platform-cli-login` token, given the same `groups` protocol mapper. See
    `src/core/ui-shell/README.md`'s own "Auth" section for the full writeup. Item 5 (real nav) is now
    unblocked — both items 2 and 3 it depended on are resolved.
+
+   **Confirmed live, 2026-09-08:** real browser round trip against `homelab-dev` end to end — "Log
+   in" redirected to Keycloak, a real login completed, landed back on `/auth/callback` then `/` with
+   `code`/`state` stripped, showed the logged-in username. The resulting access token was then handed
+   directly to gateway (`fetch` from the browser console, `Authorization: Bearer <token>` +
+   `X-Workspace: personal`) and got back a real `200 {"modules": []}` — proof gateway's full
+   `verify_token()` → `derive_headers()` chain accepts a `platform-ui-shell` token exactly like one
+   from `platform-cli-login`, not just that ui-shell can decode its own JWT locally. "Log out"
+   confirmed working too. One real bug found and fixed along the way — see
+   `docs/known-issues.md`'s entry on `post.logout.redirect.uris` needing Keycloak's `##`
+   multi-value-attribute separator, not a space (the bootstrap script 400'd on first run without it).
 4. **Gateway module registry v1 — installed modules only.** A new endpoint (extending
    `app/modules.py`, reusing `app/argocd.py`'s `list_module_applications()`) that lists installed
    modules WITH their `displayName`/`icon`/`navPath` — which requires propagating those fields from
