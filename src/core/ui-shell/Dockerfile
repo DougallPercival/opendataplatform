@@ -17,6 +17,12 @@ RUN npm ci
 COPY index.html vite.config.ts tsconfig*.json ./
 COPY public ./public
 COPY src ./src
+# .env.production carries the real, cluster-constant VITE_KEYCLOAK_* values
+# (ui-shell-plan.md item 3) — `vite build` needs it present in this
+# directory to bake them into the bundle. Without this line the build still
+# succeeds silently but every import.meta.env.VITE_* reference in the
+# shipped bundle is undefined — see src/auth/config.ts's requireEnv().
+COPY .env.production ./
 RUN npm run build
 
 # nginx-unprivileged, not stock nginx: stock nginx needs root to bind port

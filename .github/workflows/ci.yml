@@ -280,13 +280,11 @@ jobs:
     defaults:
       run:
         working-directory: src/core/ui-shell
-    # No Vitest yet — this branch is a static placeholder page (see
-    # ui-shell-plan.md item 1 and this package's own README), nothing
-    # meaningful to unit-test. `npm run build` (tsc -b && vite build)
-    # succeeding is the right stand-in signal for this slice, the same role
-    # `ruff check` + `pytest` play for the Python services above but scoped
-    # to what actually exists today. Add a real test job once item 5 (real
-    # nav) introduces something worth exercising.
+    # Vitest arrived feature/ui-shell-oauth (ui-shell-plan.md item 3) — real
+    # pure logic worth exercising now (PKCE math, expiry math, JWT-payload
+    # decoding), not a static placeholder page anymore. See
+    # src/core/ui-shell/README.md's "Running its tests" for what's covered
+    # vs. deliberately left to live verification.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -297,6 +295,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+      - run: npm test
 
   build-and-push-ui-shell:
     name: Build & push ui-shell image
