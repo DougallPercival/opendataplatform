@@ -120,6 +120,7 @@ Specific to this branch: run `bootstrap/keycloak-bootstrap-ui-shell-client.sh` o
 cluster (new client, one-time step), then a real browser login end to end — "Log in" redirects to
 Keycloak, a real login completes, lands back on `/auth/callback` then `/` with `code`/`state`
 stripped from the URL, shows the logged-in username; "Log out" clears the session and returns to
-logged-out. Whether `post.logout.redirect.uris` behaves as expected on this cluster's Keycloak
-26.7.2 is the one genuinely uncertain detail — see the bootstrap script's own header comment — worth
-a `docs/known-issues.md` entry the first time logout is actually checked, either way.
+logged-out. `post.logout.redirect.uris` needed a real fix, not just confirmation — see
+`docs/known-issues.md`'s entry on it: a multi-valued Keycloak client attribute has to be joined with
+`##`, not a space, or client creation 400s outright. Fixed in the script; worth re-checking the
+actual logout redirect behaves once it's exercised live for the first time.
