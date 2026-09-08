@@ -1088,6 +1088,62 @@ e.g. `./script.sh` rather than `bash script.sh`) needs this same one-time `git u
 side of the file-delivery pipeline (writing file bytes to your working copy has no executable bit to
 set), so it has to happen wherever the actual `git commit`/`push` happens.
 
+### `modules-root` silently stops syncing once the last module is uninstalled
+
+Added 2026-09-08, `fix/modules-root-allow-empty-sync` branch. Found live, not hypothetically: two
+test modules from an earlier branch (`needs-hello`, `needs-ghost`, platform-module-deps'
+verification round trip — see that branch's own cleanup notes) had their `modules-enabled/*.yaml`
+files removed and their source directories deleted days earlier, yet `kubectl -n needs-ghost get
+all`/`kubectl -n needs-hello get all` still showed real Deployments, Services, ReplicaSets, and Pods
+running — orphaned for 4+ days, not cleaned up the way `platform module uninstall` (and
+`modules-root`'s `prune: true`) is supposed to guarantee.
+
+**Root cause:** `modules-root.yaml`'s `Application` sources `src/modules-enabled/` as a plain
+`directory:` source. Once the last module's file was removed from that directory, its target state
+resolved to *zero* child Applications — and Argo CD has a built-in safety guard that refuses to
+auto-sync when a directory source's desired state is completely empty, specifically to protect
+against an accidental repo/path mistake silently deleting everything a directory-sourced app
+manages. `kubectl -n argocd get application modules-root -o jsonpath='{.status.conditions}'` showed
+it plainly once looked for: `"Skipping sync attempt to [...]: auto-sync will wipe out all
+resources"`. But "no modules currently installed" is a completely ordinary, expected state for this
+repo (a fresh clone starts here) — not a mistake to guard against — so this guard doesn't just skip
+one sync attempt, it permanently freezes `modules-root` from that point on, which also means it
+stops pruning anything else in `modules-enabled/` until *something* forces a real sync again. The
+two orphaned child `Application`s (`needs-ghost`, `needs-hello`) each separately showed a
+`ComparisonError` (`app path does not exist`, since their own source pointed at the now-deleted
+`src/charts/needs-*` directories) — a downstream symptom of the real problem, not the cause; the
+same "check `.status.conditions` on the parent, not just the symptomatic child" lesson as the
+`__REPO_URL__`/`__REVISION__` entry above.
+
+**Fix:** `modules-root.yaml`'s `syncPolicy.syncOptions` now includes `AllowEmpty=true`, the standard
+Argo CD flag for exactly this case — an intentionally-empty directory source is a legitimate desired
+state, not something to guard against. One line, no other change needed.
+
+**Immediate live remediation** (separate from the code fix, needed regardless since the guard had
+already been silently active for days): the two orphaned `Application` objects still carried their
+cascade-delete finalizer (`resources-finalizer.argocd.argoproj.io`, from
+`platform_cli/manifest.py`'s generated manifest — see that file's own comment), so deleting them took
+their Deployment/Service/ReplicaSet/Pod along automatically:
+
+```bash
+sudo kubectl -n argocd delete application needs-ghost needs-hello
+```
+
+`CreateNamespace=true` never cleans up the namespace it created on Application delete — that needed
+a separate manual step:
+
+```bash
+sudo kubectl delete namespace needs-ghost needs-hello
+```
+
+**Confirmed fixed, 2026-09-08:** after the two deletes above, `modules-root` flipped back to
+`Synced`/`Healthy` on its own (its target state — still empty — no longer disagreed with live
+state, so there was nothing left to skip). `kubectl -n argocd get applications` and `kubectl get ns
+| grep needs` both came back clean. The `AllowEmpty=true` fix itself prevents this from recurring
+the next time every module gets uninstalled — untested against a *second* real empty-to-nonempty
+cycle on this cluster (nothing to uninstall from at the time this was fixed), but this is Argo CD's
+own documented mechanism for exactly this guard, not a workaround this repo invented.
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a
