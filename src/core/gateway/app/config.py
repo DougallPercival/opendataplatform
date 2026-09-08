@@ -85,6 +85,20 @@ class Settings(BaseSettings):
     # argocd/README.md.
     argocd_namespace: str = "argocd"
 
+    # feature/gateway-cors-ui-shell (2026-09-08), ui-shell-plan.md item 2 —
+    # same shape as catalog-service/app/config.py's own cors_origins, but
+    # NOT theoretical here the way catalog-service's copy is (that one's
+    # unused in-cluster; a NetworkPolicy means a browser never reaches
+    # catalog-service directly). ui-shell really does call gateway
+    # cross-origin, so this needs a real value in gateway.yaml's Deployment
+    # env, not just a documented-but-empty local-dev knob — see main.py's
+    # configure_cors() for how this gets used.
+    cors_origins: str = ""
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(" ") if o.strip()]
+
     @property
     def jwks_path(self) -> str:
         return f"/realms/{self.keycloak_realm}/protocol/openid-connect/certs"

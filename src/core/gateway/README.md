@@ -29,12 +29,34 @@ membership); ARCHITECTURE.md §3's "the dependency check lives once, at the API 
 call through" — this is that one place, and a future Add-ons page (item 7, still not built) would
 call the exact same endpoint.
 
+## CORS support for ui-shell (2026-09-08, feature/gateway-cors-ui-shell branch)
+
+`docs/architecture/ui-shell-plan.md` item 2: does gateway grow a second proxy target to serve
+`ui-shell` same-origin, or does `ui-shell` keep its own Ingress host with gateway adding CORS
+instead? `app/proxy.py` turned out to be hardcoded to exactly one backend (`app.state.catalog_client`,
+no dispatch layer, auth applied uniformly to every request) — folding `ui-shell` in would have meant
+real restructuring, plus an explicit keep-or-remove call on its already-live Ingress/Certificate.
+Went with CORS: `app/config.py`'s `cors_origins`/`cors_origin_list` (same shape as
+`catalog-service/app/config.py`'s own, already-proven copy) and `app/main.py`'s `configure_cors()`
+(a plain function, not just an inline conditional, specifically so `tests/test_cors.py` can exercise
+the "configured" case directly — see that function's own docstring). `GATEWAY_CORS_ORIGINS` is set
+for real in `argocd/manifests/gateway.yaml`'s Deployment (`https://app.platform.local`, matching
+`manifests/ui-shell.yaml`'s Ingress exactly) — unlike catalog-service's same-named setting, which is
+unused in-cluster (a NetworkPolicy means a browser never reaches it directly), this one carries real
+production traffic once `ui-shell` actually starts calling gateway (items 4/5).
+
+`allow_credentials` stays at its default (`False`): identity stays bearer-token-in-`Authorization`-
+header, the same pattern `platform_sdk`/`platform-cli` already use, never a cookie — so item 3
+(browser OAuth) inherits "no cross-origin-cookie complications" as a side effect of this decision,
+not something it has to solve itself.
+
 ## What's NOT built yet — the rest of ARCHITECTURE.md's gateway scope
 
-Dependency-checking is real now (above); nav aggregation, the Add-ons page API, the module
-registry proper, and reverse-proxying into other modules' own UIs (ARCHITECTURE.md §3, item 7)
-are still not built. There's nothing to serve nav to yet — `ui-shell` doesn't exist (a five-line
-README, no code, no frontend tooling anywhere in this repo) — so building those now would be
+Dependency-checking and CORS are real now (above); nav aggregation, the Add-ons page API, the module
+registry proper, browser OAuth, and reverse-proxying into other modules' own UIs (ARCHITECTURE.md §3,
+item 7) are still not built. `ui-shell` exists now as a deployed static-placeholder scaffold
+(`feature/ui-shell-scaffold`, `docs/architecture/ui-shell-plan.md` item 1) but still makes no calls
+to gateway at all — there's nothing behind its nav yet, so building those now would still be
 speculative. This service still proxies to exactly one backend, `catalog-service`, at one fixed
 URL; the module-registry-driven "figure out where to proxy based on `modules/*/module.yaml` + live
 `PlatformModule` registrations + Argo CD `Application` status" piece ARCHITECTURE.md §3 describes

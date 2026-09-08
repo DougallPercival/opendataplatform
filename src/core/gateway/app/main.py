@@ -7,7 +7,9 @@ testing against a real cluster; see this package's README). Verifies every
 caller's Keycloak JWT and proxies to catalog-service with gateway-derived
 X-Workspace/X-User/X-Role headers — see app/auth.py and app/proxy.py for
 the actual logic; this module just wires the two httpx clients they share
-into app.state during startup and shuts them down cleanly on exit.
+into app.state during startup and shuts them down cleanly on exit. Also
+conditionally adds CORS support (configure_cors(), below) for ui-shell —
+see that function's own docstring, ui-shell-plan.md item 2.
 """
 from __future__ import annotations
 
@@ -17,8 +19,9 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
+from app.config import Settings, settings
 from app.jwks import JWKSCache
 from app.modules import router as modules_router
 from app.proxy import router as proxy_router
@@ -67,6 +70,38 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+def configure_cors(app: FastAPI, settings: Settings) -> None:
+    """Add CORSMiddleware iff GATEWAY_CORS_ORIGINS is set — a plain function
+    taking app/settings as arguments, not just an inline `if` block at
+    import time, specifically so tests can exercise the "configured" case
+    directly (settings is a module-level singleton and app is built once at
+    import, so an inline conditional can't be flipped on for one test
+    without fragile import-order tricks — see tests/test_cors.py). ui-shell-
+    plan.md item 2: ui-shell keeps its own Ingress host (app.platform.local)
+    rather than gateway growing a second proxy target, so this is real
+    cross-origin traffic in production, not just a local-dev convenience —
+    see config.py's own comment on cors_origins.
+
+    allow_methods/allow_headers of "*" mirrors catalog-service's own choice
+    (app/main.py) — gateway's actual auth (verify_token/derive_headers)
+    still governs what's accepted regardless of what CORS allows at
+    preflight, so this doesn't weaken anything real. allow_credentials
+    deliberately left at its default (False): identity stays bearer-token-
+    in-Authorization-header (platform_sdk's existing pattern), never a
+    cookie, so there's nothing cross-origin-cookie-shaped to allow.
+    """
+    if settings.cors_origin_list:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origin_list,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+
+configure_cors(app, settings)
 
 
 @app.get("/healthz")

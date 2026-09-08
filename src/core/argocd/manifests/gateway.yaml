@@ -93,6 +93,16 @@ spec:
               value: /etc/gateway/keycloak-ca/ca.crt
             - name: GATEWAY_CATALOG_SERVICE_URL
               value: http://catalog-service.catalog-service.svc.cluster.local:8000
+            - name: GATEWAY_CORS_ORIGINS
+              # feature/gateway-cors-ui-shell (2026-09-08), ui-shell-plan.md
+              # item 2 — ui-shell kept its own Ingress host
+              # (manifests/ui-shell.yaml) rather than gateway growing a
+              # second proxy target, so this is real cross-origin traffic
+              # in production, not just a local-dev convenience (see
+              # gateway/.env.example's own comment on this setting). Must
+              # match ui-shell.yaml's Ingress exactly, including the https
+              # scheme — its Certificate terminates TLS there.
+              value: https://app.platform.local
           volumeMounts:
             - name: keycloak-ca
               mountPath: /etc/gateway/keycloak-ca

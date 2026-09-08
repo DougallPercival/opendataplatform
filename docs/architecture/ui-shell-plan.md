@@ -72,6 +72,16 @@ section to point at.
    gateway grows CORS support instead (something gateway has zero of today — grepped for
    cors/CORS/Access-Control, zero matches)? This blocks item 5 — nav can't call gateway from the
    browser until one of these is chosen.
+
+   **✅ Resolved, 2026-09-08 (feature/gateway-cors-ui-shell branch): CORS, not same-origin proxy.**
+   `proxy.py` turned out to be hardcoded to exactly one backend with no dispatch layer and auth
+   applied uniformly to every request — folding ui-shell in would have meant real restructuring, plus
+   an explicit keep-or-remove call on ui-shell's already-live Ingress/Certificate. Gateway now mirrors
+   catalog-service's own proven `CORSMiddleware` pattern instead (`app/config.py`'s `cors_origins`,
+   `app/main.py`'s `configure_cors()`) — see `src/core/gateway/README.md` for the full writeup. Also
+   settles the auth-model question for item 3 ahead of time: identity stays bearer-token-in-
+   `Authorization`-header, never a cookie, so there's no cross-origin-cookie complication to solve
+   there either.
 3. **Browser OAuth2/PKCE login.** `platform-cli`'s device flow (`platform_sdk/keycloak_login.py`) is
    CLI-shaped — poll a device code, no browser redirect involved. ui-shell needs a structurally
    different flow: authorization code + PKCE, a redirect URI, session/token storage in the browser.

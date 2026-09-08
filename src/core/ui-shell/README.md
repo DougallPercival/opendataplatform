@@ -24,13 +24,18 @@ real design decisions get built on top of it — see `ui-shell-plan.md`'s "Recom
 
 ## What's NOT built yet
 
-Everything else in `ui-shell-plan.md`'s build list — items 2 through 8: the same-origin-vs-CORS
-decision for how ui-shell reaches gateway, browser OAuth2/PKCE login (a new Keycloak client, nothing
-reusable from `platform_sdk`'s CLI-shaped device flow), gateway's module registry v1, ui-shell's
-real nav, the Add-ons page's static release-time module index, Install/Remove buttons (blocked on a
-real trust-boundary question — does gateway get git push credentials?), and reverse-proxying into a
-module's own UI. Each is its own future branch and its own scoping decision, not a checklist to work
-through in order — see that doc for why.
+Items 3 through 8 of `ui-shell-plan.md`'s build list: browser OAuth2/PKCE login (a new Keycloak
+client, nothing reusable from `platform_sdk`'s CLI-shaped device flow), gateway's module registry
+v1, ui-shell's real nav, the Add-ons page's static release-time module index, Install/Remove buttons
+(blocked on a real trust-boundary question — does gateway get git push credentials?), and
+reverse-proxying into a module's own UI. Each is its own future branch and its own scoping decision,
+not a checklist to work through in order — see that doc for why.
+
+Item 2 (same-origin vs. CORS) is resolved as of `feature/gateway-cors-ui-shell` (2026-09-08) — CORS,
+not a same-origin proxy; see `src/core/gateway/README.md`'s own section on this. Nothing in *this*
+package's own code changed to get there — ui-shell still makes zero fetch calls to gateway (that's
+items 4/5); this only unblocks that future work at the gateway end (`GATEWAY_CORS_ORIGINS` now set
+to `https://app.platform.local` in `argocd/manifests/gateway.yaml`).
 
 No test suite yet either — see "Running its tests" below for why that's a deliberate choice at this
 scope, not an oversight.
