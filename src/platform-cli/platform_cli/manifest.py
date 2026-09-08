@@ -25,9 +25,19 @@ same "turn a module.yaml into a running module" conversion `platform module inst
    `modules-root` (src/core/argocd/apps/core/modules-root.yaml) picks up directly, the same way
    root-app.yaml turns files in apps/core/ into core services (see that file's own header comment
    for the three-level app-of-apps structure this relies on).
+
+   2026-09-08 (feature/gateway-module-registry branch, ui-shell-plan.md item 4): the generated
+   `Application`'s metadata also carries `displayName`/`icon`/`navPath` as `platform.io/*`
+   annotations now — gateway's `GET /modules` (app/argocd.py's `list_module_summaries()`) reads
+   them back out to build ui-shell's future nav. Values go through `json.dumps()` rather than raw
+   f-string interpolation: these are free-form operator text (`displayName` especially), and a
+   colon or quote in one would otherwise corrupt the generated YAML — a JSON string is also a valid
+   YAML double-quoted flow scalar, so this needs no new dependency. `proxyTo` deliberately stays
+   unpropagated here — that's item 8's own future pass over this same function, not this one.
 """
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -167,6 +177,10 @@ metadata:
   namespace: argocd
   labels:
     platform.io/tier: module
+  annotations:
+    platform.io/display-name: {json.dumps(manifest.displayName)}
+    platform.io/icon: {json.dumps(manifest.icon)}
+    platform.io/nav-path: {json.dumps(manifest.navPath)}
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:

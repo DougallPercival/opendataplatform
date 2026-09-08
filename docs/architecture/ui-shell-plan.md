@@ -97,6 +97,18 @@ section to point at.
    Deliberately installed-modules-only, no static index needed yet — same "the caller already has
    what it needs locally" realization item 6 had for dependency-checking; nav only needs to know
    what's *actually running*, not the full catalog.
+
+   **✅ Built, 2026-09-08 (feature/gateway-module-registry branch)** — `render_application_manifest()`
+   (`platform_cli/manifest.py`) now writes `displayName`/`icon`/`navPath` onto the generated
+   `Application` as `platform.io/display-name`/`platform.io/icon`/`platform.io/nav-path`
+   annotations (values go through `json.dumps()`, not raw interpolation, so free-form operator text
+   can't corrupt the YAML). `app/argocd.py`'s new `list_module_summaries()` reads them back out
+   (falling back to id/"puzzle"/None for any Application that predates this branch); gateway's new
+   `GET /modules` (`app/modules.py`) exposes that, reusing `require_auth` exactly like
+   `check-requirements` — the precedent that endpoint's own docstring already established for
+   non-workspace-scoped module data. `proxyTo` still isn't propagated — that stays item 8's own
+   future pass over `render_application_manifest()`. See `src/core/gateway/README.md` for the full
+   writeup. ui-shell itself still calls nothing (item 5, still blocked on item 3).
 5. **ui-shell's real nav**, calling item 4's endpoint once items 2 and 3 are resolved.
 6. **Add-ons page — the static release-time module index.** ARCHITECTURE.md §3's own description:
    "`platform-gateway` reads a static module index built from every `modules/*/module.yaml` at

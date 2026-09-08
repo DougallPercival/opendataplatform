@@ -50,19 +50,48 @@ header, the same pattern `platform_sdk`/`platform-cli` already use, never a cook
 (browser OAuth) inherits "no cross-origin-cookie complications" as a side effect of this decision,
 not something it has to solve itself.
 
+## Module registry v1 — installed modules only (2026-09-08, feature/gateway-module-registry branch)
+
+`docs/architecture/ui-shell-plan.md` item 4: `GET /modules` lists every installed module with the
+fields ui-shell's future nav (item 5) needs to render it — `display_name`, `icon`, `nav_path`, plus
+live `status`. Same shape as `check-requirements` above: `require_auth` first (401/400/403 exactly
+as that endpoint), then a Kubernetes API read, 503 on `ArgoCDUnavailableError`. Deliberately
+installed-only, every status included (not filtered to `Healthy`) — ui-shell decides how to render a
+degraded module, this endpoint just reports what's really there, the same discipline
+`list_module_applications()` already applied to health status.
+
+The real work was propagation, not a new endpoint: `platform_cli/manifest.py`'s
+`render_application_manifest()` already had `displayName`/`icon`/`navPath` on `ModuleManifest`
+(module.yaml's own schema) but wrote none of them into the deployed `Application` anywhere. Now it
+writes them as `platform.io/display-name`/`platform.io/icon`/`platform.io/nav-path` annotations —
+through `json.dumps()`, not raw f-string interpolation, since `displayName` is free-form operator
+text that could otherwise contain a colon or quote and corrupt the generated YAML.
+`app/argocd.py`'s new `list_module_summaries()` (a sibling to `list_module_applications()`, sharing
+the same underlying Kubernetes API call via a factored-out `_fetch_module_application_items()`)
+reads those annotations back out. An `Application` rendered before this branch — any module
+installed and never reinstalled — simply has none of these annotations; `list_module_summaries()`
+falls back to `module_id`/`"puzzle"`/`None` rather than erroring, so `GET /modules` still works
+against everything already live, not just a freshly-`platform module install`ed module.
+
+Auth: `GET /modules` reuses `require_auth` exactly like `check-requirements`, not a new
+workspace-optional variant — following the precedent that endpoint's own docstring already set for
+this exact situation (module `Application`s aren't workspace-scoped resources, but scoping this by
+workspace membership anyway doesn't leak anything an authenticated user couldn't already infer).
+
+`proxyTo` is still not propagated anywhere — that stays item 8's own future pass over
+`render_application_manifest()`, deliberately untouched here.
+
 ## What's NOT built yet — the rest of ARCHITECTURE.md's gateway scope
 
-Dependency-checking and CORS are real now (above); nav aggregation, the Add-ons page API, the module
-registry proper, browser OAuth, and reverse-proxying into other modules' own UIs (ARCHITECTURE.md §3,
-item 7) are still not built. `ui-shell` exists now as a deployed static-placeholder scaffold
-(`feature/ui-shell-scaffold`, `docs/architecture/ui-shell-plan.md` item 1) but still makes no calls
-to gateway at all — there's nothing behind its nav yet, so building those now would still be
-speculative. This service still proxies to exactly one backend, `catalog-service`, at one fixed
-URL; the module-registry-driven "figure out where to proxy based on `modules/*/module.yaml` + live
-`PlatformModule` registrations + Argo CD `Application` status" piece ARCHITECTURE.md §3 describes
-is future work once there's a second module (and `ui-shell`) to proxy to — the static
-`modules/*/module.yaml` index that piece needs is a separate, larger question than
-check-requirements' live Argo CD query answers (see this branch's plan, "Explicitly deferred").
+Dependency-checking, CORS, and the installed-modules registry are real now (above); nav aggregation
+(ui-shell actually calling `GET /modules`), the Add-ons page's static release-time catalog, browser
+OAuth, and reverse-proxying into other modules' own UIs (ARCHITECTURE.md §3, item 7) are still not
+built. `ui-shell` exists now as a deployed static-placeholder scaffold (`feature/ui-shell-scaffold`,
+`docs/architecture/ui-shell-plan.md` item 1) but still makes no calls to gateway at all — item 5
+(real nav) stays blocked on item 3 (browser OAuth), so building it now would still be speculative.
+This service still proxies to exactly one backend, `catalog-service`, at one fixed URL; reverse-
+proxying into a module's own UI (item 8) is future work once `proxyTo` is propagated the same way
+`displayName`/`icon`/`navPath` are here.
 
 NetworkPolicy enforcement isolating catalog-service's namespace ingress to gateway's namespace only is
 also deferred — see `docs/known-issues.md`. k3s's bundled Network Policy controller is enabled by
