@@ -89,6 +89,18 @@ section to point at.
    `platform-cli`/`platform-cli-login` are deliberately two separate Keycloak clients, never merged
    — a third, browser-shaped client continues that same separation rather than overloading either
    existing one. Nothing in `platform_sdk` is reusable here.
+
+   **✅ Built, 2026-09-08 (feature/ui-shell-oauth branch)** — a third Keycloak client,
+   `platform-ui-shell` (public, `standardFlowEnabled`, `pkce.code.challenge.method: S256` enforced),
+   created by `bootstrap/keycloak-bootstrap-ui-shell-client.sh` (one-time per cluster, same category
+   as the other two client scripts). Client-side: hand-rolled authorization-code+PKCE in
+   `src/core/ui-shell/src/auth/` — no OIDC library, no router (confirmed unnecessary: `nginx.conf`'s
+   existing SPA fallback already serves `/auth/callback`) — tokens in `sessionStorage`, silent
+   refresh scheduled before expiry. **Confirmed gateway needs zero code changes**: `app/auth.py`'s
+   `verify_token()` has no client-specific check, so any token from this new client is accepted
+   exactly like a `platform-cli-login` token, given the same `groups` protocol mapper. See
+   `src/core/ui-shell/README.md`'s own "Auth" section for the full writeup. Item 5 (real nav) is now
+   unblocked — both items 2 and 3 it depended on are resolved.
 4. **Gateway module registry v1 — installed modules only.** A new endpoint (extending
    `app/modules.py`, reusing `app/argocd.py`'s `list_module_applications()`) that lists installed
    modules WITH their `displayName`/`icon`/`navPath` — which requires propagating those fields from

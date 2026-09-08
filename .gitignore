@@ -19,6 +19,14 @@ __pycache__/
 # Secrets / local config — never commit these
 *.env
 .env.*
+# Exceptions to .env.* above (ui-shell-plan.md item 3, feature/ui-shell-oauth):
+# Vite's own convention is to COMMIT .env.production/.env.example (baked into
+# the build, cluster-constant, nothing secret in them — see .env.production's
+# own comment) and gitignore only the developer's real .env. That deliberately
+# differs from the Python services' convention the .env.* rule above was
+# written for; these two are the first files in this repo that need it.
+!src/core/ui-shell/.env.production
+!src/core/ui-shell/.env.example
 bootstrap/.env
 kubeconfig*
 *.kubeconfig
