@@ -9,6 +9,16 @@ render_application_manifest, platform-module-lifecycle branch) carries
 module}` — so "is module X up" is answerable as a single Kubernetes API list
 call against Argo CD's own CRD, no separate module registry needed.
 
+2026-09-08 (feature/gateway-module-registry branch, ui-shell-plan.md item 4):
+`list_module_summaries()` below reuses that same list call (factored out as
+`_fetch_module_application_items()`) but also reads each Application's
+`platform.io/display-name`/`platform.io/icon`/`platform.io/nav-path`
+annotations (manifest.py's `render_application_manifest()` is what writes
+them) — this is the data gateway's `GET /modules` needs to hand ui-shell's
+future nav. `list_module_applications()` itself is untouched: it's
+`check-requirements`' existing narrower contract (name -> health only), no
+reason to widen it just because a second caller now wants more.
+
 Deliberately raw `httpx` rather than the official `kubernetes` package: this
 package already talks to every other backend (catalog-service, Keycloak)
 through httpx.AsyncClient, and pulling in a heavyweight, sync-first client
@@ -33,6 +43,7 @@ a 503, a legible "can't check requirements right now" rather than a 500.
 from __future__ import annotations
 
 import ssl
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -71,15 +82,13 @@ def _read_text(path: str, *, what: str) -> str:
     return p.read_text().strip()
 
 
-async def list_module_applications() -> dict[str, str]:
-    """Returns `{module_id: health_status}` for every Argo CD Application
-    labeled `platform.io/tier=module` in `settings.argocd_namespace` — one
-    entry per module that has ever been `platform module install`ed,
-    regardless of its current health (a module can be `Progressing` or
-    `Degraded`, not just `Healthy`; app/modules.py decides what counts as
-    "satisfied", this function just reports what's really there). A module
-    that was never installed simply has no key in the returned dict —
-    callers check with `.get(module_id)`, not a KeyError.
+async def _fetch_module_application_items() -> list[dict]:
+    """The shared Kubernetes API call both `list_module_applications()` and
+    `list_module_summaries()` build on: list every Application labeled
+    `platform.io/tier=module` in `settings.argocd_namespace`, return the raw
+    `items` list from the response body. Auth/TLS/error-handling live here
+    exactly once — see this module's own docstring for why the token is read
+    fresh every call rather than cached.
     """
     token = _read_text(settings.k8s_sa_token_path, what="ServiceAccount token")
     ca_path = settings.k8s_sa_ca_path
@@ -116,10 +125,22 @@ async def list_module_applications() -> dict[str, str]:
 
     try:
         body = response.json()
-        items = body["items"]
+        return body["items"]
     except (ValueError, KeyError, TypeError) as exc:
         raise ArgoCDUnavailableError(f"Unexpected response shape from the Kubernetes API: {exc}") from exc
 
+
+async def list_module_applications() -> dict[str, str]:
+    """Returns `{module_id: health_status}` for every Argo CD Application
+    labeled `platform.io/tier=module` in `settings.argocd_namespace` — one
+    entry per module that has ever been `platform module install`ed,
+    regardless of its current health (a module can be `Progressing` or
+    `Degraded`, not just `Healthy`; app/modules.py decides what counts as
+    "satisfied", this function just reports what's really there). A module
+    that was never installed simply has no key in the returned dict —
+    callers check with `.get(module_id)`, not a KeyError.
+    """
+    items = await _fetch_module_application_items()
     result: dict[str, str] = {}
     for item in items:
         name = item.get("metadata", {}).get("name")
@@ -132,3 +153,48 @@ async def list_module_applications() -> dict[str, str]:
         health_status = item.get("status", {}).get("health", {}).get("status") or "Unknown"
         result[name] = health_status
     return result
+
+
+@dataclass
+class ModuleSummary:
+    """What `GET /modules` (app/modules.py, ui-shell-plan.md item 4) hands
+    back for one installed module — display_name/icon/nav_path come from the
+    `platform.io/*` annotations `platform_cli/manifest.py`'s
+    `render_application_manifest()` writes onto the generated Application.
+    """
+
+    module_id: str
+    display_name: str
+    icon: str
+    nav_path: str | None
+    status: str
+
+
+async def list_module_summaries() -> list[ModuleSummary]:
+    """Like `list_module_applications()`, but reads each Application's
+    `platform.io/display-name`/`platform.io/icon`/`platform.io/nav-path`
+    annotations too. An Application rendered before this branch (any module
+    installed before `feature/gateway-module-registry` merged, still not
+    reinstalled) carries none of these annotations — falls back to
+    `module_id`/`"puzzle"`/`None` rather than erroring, the same "missing
+    reads as a real, distinct default" discipline `list_module_applications()`
+    already applies to health status.
+    """
+    items = await _fetch_module_application_items()
+    summaries: list[ModuleSummary] = []
+    for item in items:
+        name = item.get("metadata", {}).get("name")
+        if not name:
+            continue
+        annotations = item.get("metadata", {}).get("annotations") or {}
+        health_status = item.get("status", {}).get("health", {}).get("status") or "Unknown"
+        summaries.append(
+            ModuleSummary(
+                module_id=name,
+                display_name=annotations.get("platform.io/display-name", name),
+                icon=annotations.get("platform.io/icon", "puzzle"),
+                nav_path=annotations.get("platform.io/nav-path"),
+                status=health_status,
+            )
+        )
+    return summaries

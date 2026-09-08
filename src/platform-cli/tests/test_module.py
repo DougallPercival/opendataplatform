@@ -132,6 +132,12 @@ def test_install_writes_commits_and_pushes(git_repo):
     assert "path: src/charts/hello" in content
     assert "namespace: hello" in content
     assert "resources-finalizer.argocd.argoproj.io" in content
+    # ui-shell-plan.md item 4 (feature/gateway-module-registry, 2026-09-08) — displayName/icon/
+    # navPath from module.yaml propagated onto the generated Application as annotations, gateway's
+    # GET /modules reads these back out.
+    assert 'platform.io/display-name: "Hello"' in content
+    assert 'platform.io/icon: "puzzle"' in content
+    assert 'platform.io/nav-path: "/hello"' in content
 
     assert _head(repo_root) == _remote_head(repo_root)  # actually pushed
 

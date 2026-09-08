@@ -14,13 +14,25 @@ aren't workspace-scoped resources); this endpoint doesn't leak anything an
 authenticated platform-cli user couldn't already infer by attempting the
 install and reading Argo CD's own error, it just answers faster and without
 a wasted failed install.
+
+`GET /modules` — ui-shell-plan.md item 4 (feature/gateway-module-registry
+branch, 2026-09-08): lists installed modules with the displayName/icon/
+navPath ui-shell's future nav needs (item 5, still deferred — blocked on
+item 3, browser OAuth). Deliberately installed-only, no static release-time
+catalog (that's item 6, bigger and separable) — same "the caller already has
+what it needs locally" move this file's check-requirements already made.
+Reuses `require_auth` exactly like check-requirements above, following that
+same precedent rather than inventing a workspace-optional auth variant: a
+verified user's own membership check gates this the same way it gates
+everything else behind gateway, even though module Applications themselves
+aren't workspace-scoped resources.
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse
 
-from app.argocd import ArgoCDUnavailableError, list_module_applications
+from app.argocd import ArgoCDUnavailableError, list_module_applications, list_module_summaries
 from app.auth import AuthError, require_auth
 from app.jwks import JWKSCache
 
@@ -63,3 +75,39 @@ async def check_requirements(
             {"module_id": module_id, "satisfied": status == _SATISFIED_STATUS, "status": status}
         )
     return {"results": results}
+
+
+@router.get("/modules")
+async def list_modules(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_workspace: str | None = Header(default=None),
+):
+    jwks: JWKSCache = request.app.state.jwks
+    try:
+        await require_auth(authorization, x_workspace, jwks)
+    except AuthError as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    try:
+        modules = await list_module_summaries()
+    except ArgoCDUnavailableError as exc:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    # Every installed module regardless of status (Healthy/Progressing/
+    # Degraded/Unknown), not filtered to healthy-only — how to render a
+    # degraded module (grey it out, badge it, hide it) is ui-shell's call
+    # once it builds real nav (item 5), not something this endpoint should
+    # pre-decide by withholding data.
+    return {
+        "modules": [
+            {
+                "module_id": m.module_id,
+                "display_name": m.display_name,
+                "icon": m.icon,
+                "nav_path": m.nav_path,
+                "status": m.status,
+            }
+            for m in modules
+        ]
+    }
