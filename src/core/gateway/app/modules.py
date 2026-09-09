@@ -26,6 +26,24 @@ same precedent rather than inventing a workspace-optional auth variant: a
 verified user's own membership check gates this the same way it gates
 everything else behind gateway, even though module Applications themselves
 aren't workspace-scoped resources.
+
+`GET /modules/catalog` — ui-shell-plan.md item 6 (feature/gateway-module-catalog branch,
+2026-09-09): the Add-ons page's static release-time catalog `GET /modules` above deliberately left
+out — every module under `src/modules/`, installed or not, overlaid with live status. Reads
+`app/module_index.py`'s `load_static_module_index()` (the JSON `platform module build-index`
+generates at gateway's own build time — see that module's docstring) for display metadata
+(`display_name`/`icon`/`nav_path`/`requires`/`optional`), then `list_module_applications()` — the
+same narrow name->health dict `check-requirements` already uses, not `list_module_summaries()` —
+for live status only, defaulting to `_NOT_INSTALLED_STATUS` exactly like `check-requirements`
+already does. Display metadata deliberately always comes from the static file, never from a live
+Application's `platform.io/*` annotations: ARCHITECTURE.md §3 scopes the overlay to *state* only
+("overlays it with... live registrations... shows each module's state"), and the static file
+(regenerated every gateway release) can't go stale relative to `module.yaml` the way a long-installed
+module's un-reinstalled Application annotations can. `requires`/`optional` are included even though
+nothing here computes satisfaction from them — a future Install button (item 7) needs exactly this
+to show a disabled state with why, and `check-requirements` above already owns that computation
+("the dependency check lives once, at the API layer both doors call through" — this endpoint only
+ever passes the raw list through).
 """
 from __future__ import annotations
 
@@ -35,6 +53,7 @@ from fastapi.responses import JSONResponse
 from app.argocd import ArgoCDUnavailableError, list_module_applications, list_module_summaries
 from app.auth import AuthError, require_auth
 from app.jwks import JWKSCache
+from app.module_index import load_static_module_index
 
 router = APIRouter()
 
@@ -109,5 +128,42 @@ async def list_modules(
                 "status": m.status,
             }
             for m in modules
+        ]
+    }
+
+
+@router.get("/modules/catalog")
+async def list_module_catalog(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_workspace: str | None = Header(default=None),
+):
+    jwks: JWKSCache = request.app.state.jwks
+    try:
+        await require_auth(authorization, x_workspace, jwks)
+    except AuthError as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    try:
+        installed = await list_module_applications()
+    except ArgoCDUnavailableError as exc:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    # A missing/malformed static index degrades to [] (see module_index.py's own docstring) rather
+    # than a second error path here — an empty catalog on its own is never a 503, only Argo CD
+    # unreachability above is.
+    static_modules = load_static_module_index()
+    return {
+        "modules": [
+            {
+                "module_id": m["id"],
+                "display_name": m["displayName"],
+                "icon": m["icon"],
+                "nav_path": m["navPath"],
+                "requires": m["requires"],
+                "optional": m["optional"],
+                "status": installed.get(m["id"], _NOT_INSTALLED_STATUS),
+            }
+            for m in static_modules
         ]
     }

@@ -15,7 +15,12 @@ hello-module, and any freshly-scaffolded module, since the template's own defaul
 `_check_requires`'s own docstring below for the full behavior, and `--skip-requires-check` for the
 escape hatch.
 
-install/uninstall are the only two of these three that touch git — `scaffold` deliberately
+`build-index` (ui-shell-plan.md item 6, feature/gateway-module-catalog branch, 2026-09-09) is a
+fourth command, added later than the three above — it also never touches git (see its own
+docstring), so `handle_module_errors` still covers its one failure surface (`ManifestError` from a
+malformed module.yaml) without needing a third decorator.
+
+install/uninstall are the only two of these four that touch git — `scaffold` deliberately
 doesn't commit anything (see its own docstring below). Both install and uninstall:
 1. Resolve the repo root from the CWD (`repo.find_repo_root`).
 2. Refuse to run against a dirty working tree (`repo.require_clean_worktree`) — this is the first
@@ -28,6 +33,7 @@ doesn't commit anything (see its own docstring below). Both install and uninstal
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -45,6 +51,7 @@ from platform_cli.manifest import (
     load_module_manifest,
     render_application_manifest,
 )
+from platform_cli.module_index import build_static_module_index
 from platform_cli.repo import commit_and_push, discover_repo_url, find_repo_root, require_clean_worktree
 
 app = typer.Typer(no_args_is_help=True)
@@ -299,6 +306,27 @@ def scaffold(name: str) -> None:
     typer.echo(f"Scaffolded {module_dir.relative_to(repo_root)} and {chart_dir.relative_to(repo_root)}.")
     typer.echo("Next: edit the chart to actually do something, review module.yaml, then:")
     typer.echo(f"  platform module install {name}")
+
+
+@app.command("build-index")
+@handle_module_errors
+def build_index(
+    out: Path = typer.Argument(..., help="Where to write the generated JSON module index."),
+) -> None:
+    """Scans every `src/modules/*/module.yaml` into a single JSON file — ui-shell-plan.md item 6,
+    ARCHITECTURE.md §3's "static module index built from every modules/*/module.yaml at release
+    time." The scan/validate logic itself lives in `module_index.py`'s
+    `build_static_module_index()`, pure and unit-tested on its own — this command is just the thin
+    CLI wrapper `build-and-push-gateway` (ci.yml) actually invokes, as a step before gateway's own
+    Docker build, writing the JSON straight into gateway's build context so its image ships with a
+    fresh catalog with no Dockerfile change needed. Unlike `install`/`uninstall`, this never
+    touches git — it only ever writes the one file at `out`, which is gitignored and regenerated
+    on every gateway build, never committed."""
+    repo_root = find_repo_root(Path.cwd())
+    modules = build_static_module_index(repo_root / MODULES_DIR)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"modules": modules}, indent=2) + "\n")
+    typer.echo(f"Wrote {len(modules)} module(s) to {out}.")
 
 
 def _copy_and_substitute(src: Path, dst: Path, replacements: dict[str, str]) -> None:
