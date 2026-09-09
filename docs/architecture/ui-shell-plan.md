@@ -133,6 +133,25 @@ section to point at.
    future pass over `render_application_manifest()`. See `src/core/gateway/README.md` for the full
    writeup. ui-shell itself still calls nothing (item 5, still blocked on item 3).
 5. **ui-shell's real nav**, calling item 4's endpoint once items 2 and 3 are resolved.
+
+   **✅ Built, 2026-09-09 (feature/ui-shell-nav branch)** — `react-router@^8.3.1`, the first routing
+   library in this repo (declarative mode: no loaders/actions anywhere here, and the route tree needs
+   to be conditionally absent while unauthenticated). `App.tsx` splits into `/auth/callback`
+   (`auth/AuthCallbackRoute.tsx`) and `Gate`, which shows `shell/LoginScreen.tsx` or `shell/Shell.tsx`
+   by `useAuth().status`; `Shell` owns its own nested routes (`/` module list, `modules/:moduleId`
+   detail) so nothing under it mounts, or calls gateway, for an unauthenticated visitor. Fixed a real
+   bug along the way: `auth/callback.ts` used to call `window.history.replaceState()` directly to
+   clean up the URL after login, which fires no `popstate` event and would leave a mounted router's
+   internal location stuck on `/auth/callback` — moved to `AuthCallbackRoute.tsx`'s `useNavigate()`
+   instead. A new `src/workspace/` module parses the ID token's `groups` claim client-side (there is
+   no "list my workspaces" endpoint anywhere in the platform) into a real workspace switcher, mirroring
+   gateway's own `derive_headers()` role logic exactly — display-only, same precedent `tokens.ts`
+   already set for `preferred_username`, never an authorization decision. A new `src/modules/` module
+   calls `GET /modules` (item 4) via a hand-rolled hook (no data-fetching library) and renders a real
+   module list and a client-side detail page per module (keyed by `module_id`, not raw `nav_path` —
+   unvalidated server-side and can be `null`), with an honest note that deep-linking into a module's
+   own UI is item 8, not built yet. See `src/core/ui-shell/README.md`'s own "Real nav" section for the
+   full writeup.
 6. **Add-ons page — the static release-time module index.** ARCHITECTURE.md §3's own description:
    "`platform-gateway` reads a static module index built from every `modules/*/module.yaml` at
    release time (so it can list modules that aren't installed yet)... overlays it with... live
