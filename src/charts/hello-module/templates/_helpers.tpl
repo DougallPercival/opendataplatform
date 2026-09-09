@@ -2,9 +2,17 @@
 {{- .Chart.Name -}}
 {{- end -}}
 
-{{- define "platform.nodeSelector" -}}
-nodeSelector:
-  platform.io/role: {{ .Values.placement.role }}
+{{- define "platform.nodeAffinity" -}}
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+            - key: platform.io/role
+              operator: In
+              values:
+                - {{ .Values.placement.role }}
 {{- end -}}
 
 {{- define "platform.tolerations" -}}
