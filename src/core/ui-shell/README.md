@@ -100,13 +100,40 @@ hand-drawn local SVG map (`modules/icons.tsx`) with a fallback glyph, not an ico
 Styling moved to CSS Modules (`Component.module.css` next to each `Component.tsx`) — `index.css` now
 holds only true globals. No UI framework introduced.
 
+## What's built (2026-09-09, feature/ui-shell-addons branch) — Add-ons page
+
+Item 7 of `ui-shell-plan.md`, scoped to a **read-only page only** — confirmed with the repo owner
+this session. Item 7 as titled ("Install/Remove buttons") presupposed a page that didn't exist yet,
+and its real mechanism hinges on an unresolved trust-boundary question (does gateway get git-write
+credentials?). That question is now decided but not built: when the mutation mechanism lands (a
+future branch), gateway will trigger a GitHub Actions `workflow_dispatch` rather than holding a
+direct git/PAT credential, reusing the same ephemeral, auto-scoped `GITHUB_TOKEN` pattern `ci.yml`
+already uses for GHCR pushes. Nothing in this branch calls it — no mutation fires from this page at
+all.
+
+New `src/addons/` directory (its own top-level concern, alongside `auth/`, `modules/`, `shell/`,
+`workspace/`), consuming item 6's `GET /modules/catalog` via a hand-rolled `fetch()` hook
+(`useAddons.ts`) that's a structural copy of `modules/useModules.ts` — same derived-at-render
+idle/loading/success/error state machine, same per-fetch `AbortController`. `Addons.tsx` lists every
+module in the catalog (installed or not), reusing `modules/icons.tsx`'s `ModuleIcon` and a copy of
+`ModuleList.module.css`'s status-badge palette. Each row shows its `requires` list as plain text (no
+dependency-satisfaction computation here — `check-requirements` still owns that) and a disabled
+`Install` button with a `title` tooltip; a page-level notice states plainly that installing/removing
+isn't built yet. A module already installed links its name to the existing
+`/modules/:moduleId` detail page instead of showing the disabled button — `ModuleDetail.tsx` needed no
+changes, it already looks up by `moduleId` against its own list independent of how the user navigated
+there.
+
+`shell/Shell.tsx` gained a `/addons` route and a small nav (`NavLink` — the first use of it in this
+repo, purely for the free active-link styling over plain `Link`) to switch between "Modules" and
+"Add-ons".
+
 ## What's NOT built yet
 
-Items 6 through 8 of `ui-shell-plan.md`'s build list: the Add-ons page's static release-time module
-index (item 6), Install/Remove buttons (item 7, blocked on a real trust-boundary question — does
-gateway get git push credentials?), and reverse-proxying into a module's own UI (item 8). Each is its
-own future branch and its own scoping decision, not a checklist to work through in order — see that
-doc for why.
+The actual Install/Remove *action* and its `workflow_dispatch` mechanism (the rest of item 7, now a
+separate future branch — decided, not built), and reverse-proxying into a module's own UI (item 8).
+Each is its own future branch and its own scoping decision, not a checklist to work through in order —
+see `ui-shell-plan.md` for why.
 
 ## Running it locally
 
@@ -156,6 +183,11 @@ tested: `useModules`, `WorkspaceContext.tsx`, `Shell.tsx`, `ModuleList.tsx`, `Mo
 `WorkspaceSwitcher.tsx` — all either need a rendered DOM (the same `jsdom` gap above) or are thin
 composition with no pure logic of their own once `workspaces.ts` is factored out.
 
+`feature/ui-shell-addons` (item 7) adds `src/addons/` on the same, unchanged discipline: `useAddons.ts`
+and `Addons.tsx` are structural copies of already-untested `useModules.ts`/`ModuleList.tsx`, and
+`addons/api.ts`'s `fromDto` is a direct field mapping, same as `modules/api.ts`'s own untested
+`fromDto` — no new test files.
+
 ## What can only be confirmed live
 
 Same category as every other containerized-service branch in this repo: the image doesn't exist
@@ -180,3 +212,12 @@ the "no workspace" empty state, if they have none); confirm switching workspaces
 detail page and the item-8 note; confirm browser back/forward and a hard refresh on
 `/modules/<id>` all work (the last one is the real test of `nginx.conf`'s `try_files` SPA fallback
 against a route besides `/`, for the first time).
+
+Specific to `feature/ui-shell-addons` (item 7, read-only page): after a real login, confirm the new
+"Add-ons" nav link appears and navigates to `/addons`; confirm every module in `src/modules/` appears
+with correct display name/icon/`requires`, and its correct status (real Argo CD health if installed,
+the "not installed" sentinel otherwise); confirm the page-level "not built yet" notice is visible and
+the Install button is disabled with a hover tooltip; if a module is installed, confirm its row links
+to the existing `/modules/<id>` detail page with no regression; confirm switching workspaces refetches
+the catalog with the new `X-Workspace` header; confirm browser back/forward and a hard refresh on
+`/addons` work (same SPA-fallback regression check as `/modules/<id>` above, now for a second route).

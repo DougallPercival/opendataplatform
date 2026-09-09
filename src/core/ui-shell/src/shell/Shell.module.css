@@ -17,6 +17,31 @@
   font-size: 18px;
 }
 
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-left: 24px;
+  flex: 1;
+}
+
+.navLink {
+  color: inherit;
+  opacity: 0.7;
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.navLink:hover {
+  opacity: 1;
+}
+
+.navLinkActive {
+  composes: navLink;
+  opacity: 1;
+  font-weight: 500;
+}
+
 .headerControls {
   display: flex;
   align-items: center;
