@@ -15,7 +15,8 @@ service:
   port: 80
 
 # ARCHITECTURE.md §7's chart-wrapper node-placement hint. Empty by default — with no
-# placement.role, templates/_helpers.tpl's platform.nodeSelector/platform.tolerations helpers
+# placement.role, templates/_helpers.tpl's platform.nodeAffinity/platform.tolerations helpers
 # render to nothing at all, so the chart is schedulable on any node until a module.yaml actually
-# asks for a role (control/storage/compute).
+# asks for a role (control/storage/compute). Even with a role set, this is a PREFERRED affinity,
+# not a hard requirement — see ARCHITECTURE.md §12's "Single-node placement fallback" decision.
 placement: {}

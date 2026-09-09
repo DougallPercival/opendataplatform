@@ -62,8 +62,10 @@ class Toleration(BaseModel):
 
 class Placement(BaseModel):
     """ARCHITECTURE.md §7: "a module's module.yaml carries an optional placement hint that the
-    chart wrapper turns into the actual nodeSelector/tolerations block" — this is that hint,
-    unchanged from what §7 shows."""
+    chart wrapper turns into the actual nodeAffinity/tolerations block" — this is that hint,
+    unchanged from what §7 shows. (Renders a PREFERRED affinity, not a hard nodeSelector — see
+    §12's "Single-node placement fallback" decision; that change lives entirely in the chart's
+    _helpers.tpl, this schema is unaffected.)"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -128,7 +130,7 @@ def load_module_manifest(path: Path) -> ModuleManifest:
 def _placement_values_block(manifest: ModuleManifest) -> str:
     """The `spec.source.helm.values` YAML text (decision 3: computed from module.yaml's own
     `placement`, empty when the module declares none — the chart's _helpers.tpl then renders no
-    nodeSelector/tolerations at all)."""
+    affinity/tolerations at all)."""
     if manifest.placement is None:
         return "placement: {}\n"
     lines = ["placement:", f"  role: {manifest.placement.role}"]

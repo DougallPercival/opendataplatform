@@ -9,10 +9,12 @@ platform-module-lifecycle branch (2026-09-03):
 
 - `_template/` — what `platform-cli module scaffold <name>` copies and parameterizes
   (`../platform-cli/README.md`'s "Module lifecycle" section). `templates/_helpers.tpl` carries
-  ARCHITECTURE.md §7's chart-wrapper node-placement mechanism (`platform.nodeSelector`/
+  ARCHITECTURE.md §7's chart-wrapper node-placement mechanism (`platform.nodeAffinity`/
   `platform.tolerations`, `include`d from `templates/deployment.yaml`, guarded by an `if` at the
   call site) — every module chart scaffolded from this template gets it for free; a module that
-  never sets `placement` in its own `module.yaml` renders with no nodeSelector/tolerations at all.
+  never sets `placement` in its own `module.yaml` renders with no affinity/tolerations at all.
+  `platform.nodeAffinity` is a PREFERRED (soft) nodeAffinity, not a hard `nodeSelector` — see
+  ARCHITECTURE.md §12's "Single-node placement fallback" decision (2026-09-09).
 - `hello-module/` — the one real chart this branch ships, for `../modules/hello-module/`'s trivial
   test module. Also the reference example for the PVC-ownership convention
   `--purge-data` relies on: `templates/pvc.yaml`'s `platform.io/module` label +

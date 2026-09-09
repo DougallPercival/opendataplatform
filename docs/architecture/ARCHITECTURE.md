@@ -175,7 +175,7 @@ Label and taint the compute node(s) so a Spark job can't starve the shell or the
 
 ## 7. Node placement & scale
 
-Every physical node gets one label — `platform.io/role: control|storage|compute` — applied once, at join time, by the same script that adds it to the cluster. Module charts don't hardcode a machine name; they request a role, so a module's `module.yaml` carries an optional placement hint that the chart wrapper turns into the actual `nodeSelector`/`tolerations` block:
+Every physical node gets one label — `platform.io/role: control|storage|compute` — applied once, at join time, by the same script that adds it to the cluster. Module charts don't hardcode a machine name; they request a role, so a module's `module.yaml` carries an optional placement hint that the chart wrapper turns into a *preferred* node affinity plus a `tolerations` block — a soft ask, not a hard `nodeSelector` (see §12's "Single-node placement fallback" decision for why):
 
 ```yaml
 placement:
@@ -188,6 +188,8 @@ placement:
 ```
 
 That's what makes the taint in §6 real: `kubectl taint nodes node-c platform.io/role=compute:NoSchedule` means nothing except compute-labeled workloads lands there — the shell, gateway, and catalog stay off it entirely, even under load.
+
+On a cluster with only one node — nothing in this repo assumes at least two, but §6's reference topology does — that node can only ever carry one `platform.io/role` value, so it will never exactly match every module's requested role. A preferred (not hard) affinity is what keeps that from being a hard failure: the module still schedules on the only node available, it just doesn't get the placement preference honored until a real role-labeled node exists.
 
 **Adding a node.** On a machine you own, growing the cluster is a physical act: plug it in, then `bootstrap/join-node.sh --role compute --token <k3s-token>` installs the k3s agent, applies the role label and taint, and the scheduler picks it up immediately. No chart changes anywhere — existing compute-role workloads simply get more room, and the next ephemeral Spark/Dask job can land there. Removing a node is the same in reverse: cordon, drain, then physically pull it (or terminate it, on cloud).
 
@@ -344,6 +346,10 @@ Makes "decide what pieces you want" a literal file operation instead of a runboo
 **Node roles.**
 *Picked:* the 3-node reference in §6, as a starting assumption.
 Actual specs will move things around — swap in your real node count and RAM/CPU and the control/storage/compute split should adjust accordingly.
+
+**Single-node placement fallback.**
+*Picked:* `platform.nodeAffinity` renders a preferred (soft) `nodeAffinity`, not a hard `nodeSelector` (2026-09-09).
+Hit for real installing `hello-module` on a single-node homelab cluster: its one node is labeled `control` (§7's join-time label can only ever hold one value), so a hard `nodeSelector: platform.io/role: compute` left the pod `Pending` forever — no node could ever match. §6's node-role model is written around at least two physical nodes and never actually says what one node should do. Rather than requiring an explicit `singleNode` flag or auto-detecting node count from inside a Helm template (fragile under Argo CD's rendering, and one more thing to keep in sync), the chart wrapper just asks for a role-labeled node without demanding one: `preferredDuringSchedulingIgnoredDuringExecution` schedules onto a matching node when one exists — the real placement behavior a multi-node cluster still gets, since tolerations are unchanged and still gate landing on a tainted compute node — and falls back to whatever's available when nothing matches. Trades a small amount of placement precision on a real multi-node cluster (a `Pending`/unscheduled pod would have been a loud, obvious signal that placement is misconfigured; a silently-ignored preference is quieter) for not hard-failing the common single-box case this repo is actually developed and tested against day to day. Worth revisiting if a real multi-node cluster ever wants that hard-failure signal back — e.g. a lint/CI check that flags a `role` with no matching node label, rather than baking the strictness into the scheduler decision itself.
 
 **Function sharing: local-only vs a cross-instance hub.**
 *Picked:* local-only for now — visibility scoping (private/workspace/public) inside your own catalog, nothing shared outside it.

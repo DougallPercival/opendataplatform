@@ -15,7 +15,7 @@ spec:
         app: {{ include "platform.fullname" . }}
     spec:
       {{- if .Values.placement.role }}
-      {{- include "platform.nodeSelector" . | nindent 6 }}
+      {{- include "platform.nodeAffinity" . | nindent 6 }}
       {{- end }}
       {{- if .Values.placement.tolerations }}
       {{- include "platform.tolerations" . | nindent 6 }}
