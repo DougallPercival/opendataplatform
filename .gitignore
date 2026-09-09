@@ -16,6 +16,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# Generated, never committed — build-and-push-gateway's CI step (ci.yml) regenerates this on every
+# gateway build via `platform module build-index` (ui-shell-plan.md item 6). See
+# src/core/gateway/app/config.py's static_module_index_path and README.md's "Running it locally"
+# for running the generator by hand.
+src/core/gateway/app/module_catalog.json
+
 # Secrets / local config — never commit these
 *.env
 .env.*
