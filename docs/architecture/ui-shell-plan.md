@@ -160,6 +160,33 @@ section to point at.
    static-index half — a new CI/build step scanning `src/modules/*/module.yaml` into a JSON
    artifact something can serve — has no code anywhere. Bigger and separable from item 4's live-only
    registry.
+
+   **✅ Built (backend only), 2026-09-09 (feature/gateway-module-catalog branch)** — deliberately
+   the same item-4/item-5 split: this branch is the endpoint, the Add-ons *page* itself in
+   `ui-shell` is a future item. `platform module build-index <out-path>` (new,
+   `platform_cli/module_index.py`'s pure `build_static_module_index()`) scans every
+   `src/modules/*/module.yaml` except `_template`, validated through the same `load_module_manifest`
+   `install`/`scaffold` already use. It runs as a new step in `build-and-push-gateway` (`ci.yml`),
+   before the Docker build, writing straight into `src/core/gateway/app/module_catalog.json` —
+   inside gateway's existing `COPY app ./app`, no Dockerfile change needed, and gateway's own build
+   context stays scoped to `src/core/gateway` rather than growing a cross-package one. `src/modules/**`
+   joined gateway's CI path filter as part of this — it watched nothing before, so a module-only
+   change used to trigger no rebuild at all. Gateway's new `GET /modules/catalog`
+   (`app/module_index.py`'s `load_static_module_index()` + the same `list_module_applications()`
+   `check-requirements` already uses) lists every module in the static index, installed or not,
+   overlaid with live status — display fields always come from the static file, never a live
+   Application's annotations, so a long-installed module's stale un-reinstalled annotations can't
+   leak through. A missing/malformed static file degrades to an empty catalog, never a crash or a
+   503 — a different failure mode than `ArgoCDUnavailableError`, since nothing else behind gateway
+   reads this file.
+
+   **Confirmed live, 2026-09-09**, against `homelab-dev` after a real `dev`-branch CI run and
+   `rollout restart`: the generated `module_catalog.json` landed inside the running pod exactly
+   where `config.py` expects it; `GET /modules/catalog` returned `hello-module` with its real
+   `display_name`/`icon`/`nav_path`/`requires`/`optional` from the static file and `status:
+   "Healthy"` sourced from live Argo CD (not the static file's default) — proof the overlay is a
+   real merge of the two, not one path silently winning; missing/wrong-workspace auth returned
+   401/403 exactly like `GET /modules` and `GET /modules/check-requirements`.
 7. **Install/Remove buttons on the Add-ons page.** A real, unanswered trust-boundary question, not
    a UI question: does gateway get git push credentials to actually commit
    `modules-enabled/*.yaml` the way `platform-cli` does from the operator's own local git checkout
