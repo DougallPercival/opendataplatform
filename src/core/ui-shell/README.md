@@ -2,7 +2,7 @@
 
 ARCHITECTURE.md §2's "one front door: unified nav... catalog browser... pipeline & run status...
 deep-links into each module's own UI... workspace switcher." `docs/architecture/ui-shell-plan.md`
-scoped that into 8 separately-decidable pieces; items 1 and 3 are built so far, see below.
+scoped that into 8 separately-decidable pieces; items 1, 3, and 5 are built so far, see below.
 
 ## What's built (2026-09-04, feature/ui-shell-scaffold branch)
 
@@ -58,13 +58,53 @@ token from this new client is accepted exactly like a `platform-cli-login` token
 carries the `groups` claim (the bootstrap script adds the same protocol mapper the other two
 clients have).
 
+## What's built (2026-09-09, feature/ui-shell-nav branch) — Real nav
+
+Item 5: ui-shell stops being a login button and becomes an actual app. `react-router@^8.3.1`
+(declarative mode — `BrowserRouter`/`Routes`/`Route`, not the data router; there are no
+loaders/actions anywhere here, and the route tree needs to be conditionally absent while
+unauthenticated, which fits an ordinary `if` far better) is the first routing library in this repo.
+`App.tsx` now splits into `/auth/callback` (`auth/AuthCallbackRoute.tsx`) and everything else
+(`Gate`, which shows `shell/LoginScreen.tsx` or `shell/Shell.tsx` depending on `useAuth().status`).
+`Shell` owns its own nested `<Routes>` — `/` (the module list) and `modules/:moduleId` (a detail
+page) — so nothing under it (the workspace switcher, the module list, any gateway call) ever mounts
+for an unauthenticated visitor.
+
+**A real bug fixed along the way**: `auth/callback.ts` used to call
+`window.history.replaceState({}, '', '/')` directly to strip `?code&state` from the URL after a
+login. That call fires no `popstate` event, so a mounted client router would never see it — the URL
+bar would read `/` while the router's own internal location stayed stuck on `/auth/callback`. Fixed
+by removing that call and adding the router-side cleanup to `auth/AuthCallbackRoute.tsx` instead,
+via `useNavigate()`. `AuthContext.tsx`'s own `isCallbackPath()`/`callbackHandled` guard needed no
+changes — it only ever reads `window.location.pathname` once, never touches history.
+
+**Workspace switcher** (`src/workspace/`): there is no "list my workspaces" endpoint anywhere in the
+platform, and gateway requires an `X-Workspace` header on every call — the only source is the ID
+token's own `groups` claim (`/workspaces/<name>/<role>` entries), decoded client-side via the
+*existing* `decodeJwtPayload` from `auth/tokens.ts` (same display-only precedent it already
+established for `preferred_username` — this never makes an authorization decision, that stays
+gateway's job). `workspaces.ts`'s `parseWorkspaceMemberships()` mirrors gateway's own
+`derive_headers()` exactly (`owner`/`editor`/`viewer` only, same dedupe priority). Selection persists
+in `sessionStorage`.
+
+**Module list and detail** (`src/modules/`): `GET /modules` (item 4) via plain `fetch()` in a
+hand-rolled hook (`useModules.ts`) — no data-fetching library, one GET endpoint refetched on
+workspace change, same "hand-rolled for a narrow mechanism" choice this repo has made twice already
+(gateway's raw `httpx`, ui-shell's own PKCE). Clicking a module routes to `/modules/<module_id>`
+(keyed by `module_id`, not raw `nav_path` — `nav_path` is completely unvalidated server-side and can
+be `null`) and shows real live data from the already-fetched list, with an honest note that opening
+the module's own UI is item 8, not built yet — not a fake iframe or dead link. Icons are a small
+hand-drawn local SVG map (`modules/icons.tsx`) with a fallback glyph, not an icon-library dependency
+— `icon` is a completely free-form string with no enforced value set anywhere in the platform.
+
+Styling moved to CSS Modules (`Component.module.css` next to each `Component.tsx`) — `index.css` now
+holds only true globals. No UI framework introduced.
+
 ## What's NOT built yet
 
-Items 5 through 8 of `ui-shell-plan.md`'s build list: ui-shell's real nav (unblocked as of this
-branch — items 2 and 3 it depended on are both resolved now), gateway's module registry is item 4
-(built, `feature/gateway-module-registry`, see `src/core/gateway/README.md`), the Add-ons page's
-static release-time module index, Install/Remove buttons (blocked on a real trust-boundary question
-— does gateway get git push credentials?), and reverse-proxying into a module's own UI. Each is its
+Items 6 through 8 of `ui-shell-plan.md`'s build list: the Add-ons page's static release-time module
+index (item 6), Install/Remove buttons (item 7, blocked on a real trust-boundary question — does
+gateway get git push credentials?), and reverse-proxying into a module's own UI (item 8). Each is its
 own future branch and its own scoping decision, not a checklist to work through in order — see that
 doc for why.
 
@@ -99,15 +139,22 @@ npm run build  # tsc -b && vite build
 npm test       # vitest run
 ```
 
-Vitest arrived this branch (`feature/ui-shell-oauth`) — the trigger the earlier version of this
-README named: real pure logic worth exercising (PKCE math, expiry math, JWT-payload decoding), not
-a static placeholder page anymore. Scoped narrowly, matching gateway's own "pure logic direct, live
-for the rest" discipline: `src/auth/pkce.test.ts` and `tokens.test.ts` cover the PKCE/token-storage
-math directly (including RFC 7636 Appendix B's own worked example, not just self-consistency) —
+Vitest arrived `feature/ui-shell-oauth` (item 3) — the trigger the earlier version of this README
+named: real pure logic worth exercising (PKCE math, expiry math, JWT-payload decoding), not a static
+placeholder page anymore. Scoped narrowly, matching gateway's own "pure logic direct, live for the
+rest" discipline: `src/auth/pkce.test.ts` and `tokens.test.ts` cover the PKCE/token-storage math
+directly (including RFC 7636 Appendix B's own worked example, not just self-consistency) —
 deliberately *not* testing the actual `fetch()` calls, redirects, or component rendering, since
 those need a real Keycloak or a rendered DOM to mean anything. Runs in Vitest's default `node`
 environment, not `jsdom` — `crypto.subtle` is a Node 22 global but a known `jsdom` gap, and skipping
-it also avoids pulling in `@testing-library/react` for component tests this branch doesn't add.
+it also avoids pulling in `@testing-library/react` for component tests.
+
+`feature/ui-shell-nav` (item 5) added `src/workspace/workspaces.test.ts` on the same discipline —
+`parseWorkspaceMemberships()`'s parsing/dedupe logic and the `sessionStorage` round-trip are real
+pure logic, covered directly with hand-built fixtures, no mocking framework. Deliberately *not*
+tested: `useModules`, `WorkspaceContext.tsx`, `Shell.tsx`, `ModuleList.tsx`, `ModuleDetail.tsx`,
+`WorkspaceSwitcher.tsx` — all either need a rendered DOM (the same `jsdom` gap above) or are thin
+composition with no pure logic of their own once `workspaces.ts` is factored out.
 
 ## What can only be confirmed live
 
@@ -124,3 +171,12 @@ logged-out. `post.logout.redirect.uris` needed a real fix, not just confirmation
 `docs/known-issues.md`'s entry on it: a multi-valued Keycloak client attribute has to be joined with
 `##`, not a space, or client creation 400s outright. Fixed in the script; worth re-checking the
 actual logout redirect behaves once it's exercised live for the first time.
+
+Specific to `feature/ui-shell-nav` (item 5): after a real login, confirm the URL bar reads `/` with
+no leftover `?code&state` (the direct regression check for the `history.replaceState` fix above);
+confirm the workspace switcher shows the real group-derived workspace(s) for the logged-in user (or
+the "no workspace" empty state, if they have none); confirm switching workspaces fires a fresh
+`GET /modules` with the new `X-Workspace` header and the list updates; click a module, confirm the
+detail page and the item-8 note; confirm browser back/forward and a hard refresh on
+`/modules/<id>` all work (the last one is the real test of `nginx.conf`'s `try_files` SPA fallback
+against a route besides `/`, for the first time).

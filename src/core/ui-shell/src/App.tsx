@@ -1,33 +1,33 @@
-// ui-shell-plan.md item 3: real browser login, still deliberately not real
-// nav (that's item 5, a separate future branch) — just enough UI to prove
-// the auth flow actually works end to end: a login button when logged out,
-// the logged-in username + a logout button when logged in. See
-// src/auth/AuthContext.tsx for the actual OAuth2/PKCE implementation this
-// consumes.
+// ui-shell-plan.md item 5: the top-level route split. /auth/callback must
+// render regardless of auth status — it's what drives status out of
+// 'loading' in the first place (see auth/AuthCallbackRoute.tsx) — so it gets
+// its own top-level Route rather than living inside Gate's authenticated-only
+// tree. Everything else goes through Gate, which decides between the login
+// screen and the real authenticated shell based on useAuth().status; Shell
+// (shell/Shell.tsx) owns its own nested Routes for the authenticated app, so
+// nothing under it (workspace switcher, module list/detail, any future gateway
+// call) ever mounts for an unauthenticated visitor.
+import { Route, Routes } from 'react-router'
+import AuthCallbackRoute from './auth/AuthCallbackRoute'
 import { useAuth } from './auth/useAuth'
+import { LoginScreen } from './shell/LoginScreen'
+import { Shell } from './shell/Shell'
 
 function App() {
-  const { status, tokens, message, login, logout } = useAuth()
-
   return (
-    <main>
-      <h1>ui-shell</h1>
-      {status === 'loading' && <p>loading...</p>}
-      {status === 'unauthenticated' && (
-        <>
-          <p>not logged in.</p>
-          <button onClick={login}>Log in</button>
-        </>
-      )}
-      {status === 'authenticated' && tokens && (
-        <>
-          <p>logged in as {tokens.preferredUsername}.</p>
-          <button onClick={logout}>Log out</button>
-        </>
-      )}
-      {status === 'error' && <p>login error: {message}</p>}
-    </main>
+    <Routes>
+      <Route path="/auth/callback" element={<AuthCallbackRoute />} />
+      <Route path="/*" element={<Gate />} />
+    </Routes>
   )
+}
+
+function Gate() {
+  const { status, message } = useAuth()
+
+  if (status === 'loading') return <p>loading...</p>
+  if (status === 'authenticated') return <Shell />
+  return <LoginScreen message={status === 'error' ? message : null} />
 }
 
 export default App

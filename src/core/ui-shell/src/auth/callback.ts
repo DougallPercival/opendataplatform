@@ -14,7 +14,7 @@ interface TokenResponse {
   expires_in: number
 }
 
-/** Exchanges the authorization code in the current URL for a token set, saves it, and strips code/state from the visible URL. Single-use — see AuthContext.tsx's module-level guard against React 19 StrictMode's dev-only double effect invocation, which would otherwise call this twice for one real login. */
+/** Exchanges the authorization code in the current URL for a token set and saves it. Single-use — see AuthContext.tsx's module-level guard against React 19 StrictMode's dev-only double effect invocation, which would otherwise call this twice for one real login. Purely the token exchange — no navigation/history side effect here (that used to be window.history.replaceState() at the end of this function; item 5, ui-shell-plan.md, moved it to AuthCallbackRoute.tsx's useNavigate() call instead, since a raw history mutation fires no popstate event and a mounted client router would never see it — its internal location would go stale at '/auth/callback' even though the visible URL bar had changed). */
 export async function handleCallback(): Promise<TokenSet> {
   const url = new URL(window.location.href)
   const error = url.searchParams.get('error')
@@ -66,10 +66,6 @@ export async function handleCallback(): Promise<TokenSet> {
     preferredUsername,
   }
   saveTokens(tokens)
-
-  // Strip ?code&state from the visible URL without a further navigation —
-  // leaving them would mean a page refresh re-reads an already-spent code.
-  window.history.replaceState({}, '', '/')
 
   return tokens
 }
