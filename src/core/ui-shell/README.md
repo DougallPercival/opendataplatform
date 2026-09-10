@@ -128,12 +128,54 @@ there.
 repo, purely for the free active-link styling over plain `Link`) to switch between "Modules" and
 "Add-ons".
 
+## What's built (2026-09-10, feature/ui-shell-addons-mutation branch) — Install/Remove
+
+The rest of item 7: the Add-ons page's Install/Remove buttons now actually call gateway's mutation
+endpoints (`POST /modules/{id}/install` and `.../uninstall`, `feature/gateway-module-lifecycle-dispatch`
+— already live-verified end to end against `homelab-dev`, including both the kubeseal-KUBECONFIG and
+GitHub-default-branch wrinkles it hit). Both endpoints are fire-and-forget: a `202` just means "queued,"
+so most of this branch is what happens after that — turning "queued" into something a person looking at
+the page can actually make sense of, without pretending to know when it's really done.
+
+New `src/addons/mutations.ts` (pure `fetch()` wrapper, same shape as `modules/api.ts`'s calls) posts to
+the two endpoints and turns a non-2xx response into a typed `AddonMutationError` (carrying `status`,
+`detail`, and — for a `409` — `unsatisfied`, gateway's list of unmet `requires`). State lives in a new
+pure/React split, the same pattern `workspace/workspaces.ts`/`WorkspaceContext.tsx` already established:
+`src/addons/mutationState.ts` is the pure state machine (`submitting` → `queued` → resolved, or
+`timed-out` if polling runs out, or `error`), and `src/addons/useAddonMutations.ts` is the React hook
+wrapping it — one hook instance for the whole page (a single `Map` keyed by `moduleId`), not one per
+row, so every row renders off the same source of truth. Per this session's scoping decision, a `queued`
+mutation triggers a short polling window against the already-fetched catalog (`useAddons`'s own
+`refetch`, every 5s for up to 2 minutes): the moment the catalog's status for that module flips to what
+the mutation was waiting for, the entry resolves itself and the row goes back to normal — no separate
+"did it work?" endpoint, this just rides `GET /modules/catalog`, the same one the page already polls
+implicitly by refetching. If the window runs out first, the row falls back to a plain "still processing"
+note instead of a spinner that never resolves.
+
+Getting the queued→resolved resolution right meant deliberately *not* reacting to `entries` inside a
+`useEffect` — an early draft did exactly that and oxlint's `react(set-state-in-effect)` rule caught it
+immediately, the same "computed at render time, never set synchronously inside an effect body"
+discipline `useAddons.ts`'s own docstring already documents. The fix: `rawStates` only changes on real
+events (a click, or the periodic timeout sweep), and the publicly-used `states` value is derived at
+render time by diffing `rawStates` against the latest `entries` — no effect involved in that step at
+all, only in the polling interval itself, which starts and stops on `hasAnyQueued(states)`.
+
+Role-gating: `Addons.tsx` reads `role` off `useWorkspace()`'s existing `WorkspaceMembership` data (no
+new API call) and disables both buttons with a tooltip for a `viewer`, mirroring gateway's own
+`require_role(derived, "editor")` — a UX nicety only, gateway re-checks on every request regardless of
+what the client shows. Remove goes through an inline confirm/cancel step (not a native `confirm()`
+dialog — matches this repo's stated avoidance of those elsewhere) with copy noting removal can take a
+few minutes to fully complete; that caveat is deliberate, not filler — `docs/known-issues.md` documents
+a real, still-open `modules-root` prune gap that can leave an uninstalled module's `Application` object
+lingering until someone runs the documented manual `kubectl delete application` workaround, and this
+branch ships Remove with that caveat rather than blocking on fixing the gap first (this session's own
+scoping decision).
+
 ## What's NOT built yet
 
-The actual Install/Remove *action* and its `workflow_dispatch` mechanism (the rest of item 7, now a
-separate future branch — decided, not built), and reverse-proxying into a module's own UI (item 8).
-Each is its own future branch and its own scoping decision, not a checklist to work through in order —
-see `ui-shell-plan.md` for why.
+Reverse-proxying into a module's own UI (item 8) — the last item on `ui-shell-plan.md`'s build list.
+Also still open, tracked separately in `docs/known-issues.md` rather than here since it's a platform
+issue and not specific to this page: the `modules-root` prune gap noted above.
 
 ## Running it locally
 
@@ -188,6 +230,18 @@ and `Addons.tsx` are structural copies of already-untested `useModules.ts`/`Modu
 `addons/api.ts`'s `fromDto` is a direct field mapping, same as `modules/api.ts`'s own untested
 `fromDto` — no new test files.
 
+`feature/ui-shell-addons-mutation` (item 7, Install/Remove) adds one new test file,
+`src/addons/mutationState.test.ts` (16 tests) — `mutationState.ts` is exactly the kind of pure,
+no-fetch, no-React logic this section's discipline calls for direct coverage, same as
+`workspace/workspaces.test.ts`'s precedent: `isInstalled` (the not-installed-sentinel comparison),
+`resolveQueuedMutations` (a queued install/uninstall resolving once the catalog flips, staying queued
+when it hasn't, ignoring non-queued entries, returning the same `Map` reference when nothing changed —
+the same-reference check matters here since it's what lets `useAddonMutations` derive `states` at
+render time every render without needless work), `timeOutStaleMutations`, and `hasAnyQueued`.
+Deliberately *not* tested, same reasoning as every other hook/component in this section:
+`mutations.ts`'s `fetch()` calls, `useAddonMutations.ts` itself, and `Addons.tsx`'s new row/button
+state machine — all need a real network call or a rendered DOM to mean anything.
+
 ## What can only be confirmed live
 
 Same category as every other containerized-service branch in this repo: the image doesn't exist
@@ -221,3 +275,20 @@ the Install button is disabled with a hover tooltip; if a module is installed, c
 to the existing `/modules/<id>` detail page with no regression; confirm switching workspaces refetches
 the catalog with the new `X-Workspace` header; confirm browser back/forward and a hard refresh on
 `/addons` work (same SPA-fallback regression check as `/modules/<id>` above, now for a second route).
+
+Specific to `feature/ui-shell-addons-mutation` (item 7, Install/Remove): with an editor- or owner-role
+login, click Install on a not-installed module — confirm the button flips to a disabled "Installing…",
+a "queued" note appears, the page polls quietly in the background, and once the triggered workflow
+finishes and Argo CD reconciles, the row flips to `Healthy` with real Install/Remove controls and no
+manual refresh needed. Click Remove on an installed module — confirm the inline confirm/cancel step
+appears with the "can take a few minutes" note, and after confirming, the same queued→polling→resolved
+flow; because of the still-open `modules-root` prune gap (`docs/known-issues.md`), this may need the
+documented manual `kubectl -n argocd delete application <module-id>` workaround to actually resolve —
+worth confirming whether it resolves on its own or needs that nudge, and either way confirm the row
+recovers correctly once it does. Confirm the 2-minute timeout path: whether by waiting it out or by
+temporarily lowering `POLL_TIMEOUT_MS`, confirm a stuck mutation falls back to the "still processing"
+note and a fresh, clickable button rather than a permanently disabled one. Log in as a viewer-role user
+and confirm both buttons render disabled with the "Requires at least editor access" tooltip and no
+request ever reaches gateway. If a module with an unsatisfied `requires` is reachable in the current
+catalog state, click Install on it and confirm the `409`'s `unsatisfied` list renders in the error note
+rather than a generic message.
