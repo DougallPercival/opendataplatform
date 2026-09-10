@@ -11,7 +11,7 @@ import pytest
 import respx
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from app.auth import AuthError, derive_headers, verify_token
+from app.auth import AuthError, DerivedHeaders, derive_headers, require_role, verify_token
 from app.jwks import JWKSCache
 
 BASE_URL = "https://keycloak.test"
@@ -167,3 +167,38 @@ def test_derive_headers_as_headers_shape():
     claims = {"preferred_username": "alice", "groups": ["/workspaces/personal/editor"]}
     derived = derive_headers(claims, "personal")
     assert derived.as_headers() == {"X-Workspace": "personal", "X-User": "alice", "X-Role": "editor"}
+
+
+# ---- require_role -----------------------------------------------------
+# ui-shell-plan.md item 7's mutation mechanism (feature/gateway-module-lifecycle-dispatch,
+# 2026-09-10) — the first caller of _ROLE_PRIORITY's ordering for anything beyond plain membership.
+
+
+def _derived(role: str) -> DerivedHeaders:
+    return DerivedHeaders(workspace="personal", user="alice", role=role)
+
+
+def test_require_role_allows_owner_against_editor_minimum():
+    require_role(_derived("owner"), "editor")  # doesn't raise
+
+
+def test_require_role_allows_editor_against_editor_minimum():
+    require_role(_derived("editor"), "editor")  # doesn't raise
+
+
+def test_require_role_rejects_viewer_against_editor_minimum():
+    with pytest.raises(AuthError) as exc_info:
+        require_role(_derived("viewer"), "editor")
+    assert exc_info.value.status_code == 403
+    assert "editor" in exc_info.value.detail
+    assert "viewer" in exc_info.value.detail
+
+
+def test_require_role_rejects_editor_against_owner_minimum():
+    with pytest.raises(AuthError) as exc_info:
+        require_role(_derived("editor"), "owner")
+    assert exc_info.value.status_code == 403
+
+
+def test_require_role_allows_owner_against_owner_minimum():
+    require_role(_derived("owner"), "owner")  # doesn't raise

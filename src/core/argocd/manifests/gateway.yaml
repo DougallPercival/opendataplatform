@@ -103,6 +103,22 @@ spec:
               # match ui-shell.yaml's Ingress exactly, including the https
               # scheme — its Certificate terminates TLS there.
               value: https://app.platform.local
+            - name: GATEWAY_GITHUB_TOKEN
+              # ui-shell-plan.md item 7's mutation mechanism (feature/gateway-module-lifecycle-
+              # dispatch, 2026-09-10) — app/github_dispatch.py's trigger_module_workflow(). A
+              # fine-grained GitHub PAT scoped to Actions: read/write on this repo ONLY (no
+              # Contents permission — the actual git commit/push happens inside the triggered
+              # workflow, using its own ephemeral GITHUB_TOKEN, never this value). This repo's
+              # FIRST real SealedSecret (see the bottom of this file) — sealed-secrets has been
+              # deployed since day one (apps/core/sealed-secrets.yaml) but never actually used
+              # until now. Generate the PAT on GitHub, then run
+              # bootstrap/seal-gateway-github-token.sh to produce the real encryptedData below —
+              # see that script and gateway/README.md for the exact steps; this repo, as
+              # committed, never carries a real plaintext or working ciphertext for this value.
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-github-token
+                  key: token
           volumeMounts:
             - name: keycloak-ca
               mountPath: /etc/gateway/keycloak-ca
@@ -238,3 +254,34 @@ spec:
                 name: gateway
                 port:
                   number: 8080
+---
+# This repo's FIRST real SealedSecret — see the Deployment's GATEWAY_GITHUB_TOKEN comment above for
+# the full "why" (ui-shell-plan.md item 7's mutation mechanism). sealed-secrets (apps/core/
+# sealed-secrets.yaml, wave 0) has been deployed since day one but never actually had anything
+# sealed with it until now.
+#
+# `encryptedData.token` below is a PLACEHOLDER, not a working ciphertext — kubeseal encrypts
+# asymmetrically against a specific cluster's own public key, so nothing produced outside your real
+# `homelab-dev` cluster can ever decrypt correctly there. Generate the real value with
+# `bootstrap/seal-gateway-github-token.sh` (prompts for the PAT interactively, fetches your
+# cluster's real sealed-secrets public cert via `kubeseal --fetch-cert`, and overwrites this
+# document with the real encryptedData) — see that script and gateway/README.md's "GitHub PAT for
+# the module-lifecycle dispatch" section for the exact GitHub PAT scope to create first
+# (fine-grained, this repo only, Actions: read and write, no other permission).
+#
+# Same file/Application as everything above (apps/core/gateway.yaml's `directory.include:
+# "gateway.yaml"` already scopes to this one file) — no new Application needed, matching how this
+# file already carries the Deployment/Service/RBAC/Certificate/Ingress together.
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: gateway-github-token
+  namespace: gateway
+spec:
+  encryptedData:
+    token: PLACEHOLDER-run-bootstrap/seal-gateway-github-token.sh-to-generate-the-real-value
+  template:
+    metadata:
+      name: gateway-github-token
+      namespace: gateway
+    type: Opaque

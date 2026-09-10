@@ -108,6 +108,26 @@ class Settings(BaseSettings):
     # running locally.
     static_module_index_path: str = "app/module_catalog.json"
 
+    # ui-shell-plan.md item 7's mutation mechanism (feature/gateway-module-lifecycle-dispatch,
+    # 2026-09-10) — app/github_dispatch.py's trigger_module_workflow(). github_token is
+    # deliberately blank by default, same "missing -> a clear, distinct error, not a crash" shape
+    # k8s_sa_token_path/keycloak_ca_path already use: in a real Deployment it comes from a
+    # SealedSecret-backed Secret via secretKeyRef (argocd/manifests/gateway.yaml,
+    # GATEWAY_GITHUB_TOKEN), decrypted in-cluster — the plaintext never touches git, and local
+    # dev/tests never set it, which is exactly when github_dispatch.py should refuse up front
+    # rather than attempt a request with an empty Authorization header.
+    github_token: str = ""
+    github_api_url: str = "https://api.github.com"
+    # Real casing (not GHCR's lowercased form — see ci.yml's IMAGE_NAME comment for why that one's
+    # different): the GitHub REST API's own repo path segment, matching every repoURL: elsewhere.
+    github_repo: str = "DougallPercival/opendataplatform"
+    github_workflow_file: str = "module-lifecycle.yml"
+    # Always `dev` — the one branch every self-referencing Application and every module
+    # `platform module install` generates already targets (see argocd/README.md's "Self-referencing
+    # apps" section). Not derived from anything at request time; there's no notion of "install
+    # against test/main" anywhere else in this repo either.
+    github_dispatch_ref: str = "dev"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(" ") if o.strip()]
