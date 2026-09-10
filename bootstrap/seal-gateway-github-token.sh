@@ -45,10 +45,21 @@ TARGET_NAMESPACE="gateway"
 SECRET_NAME="gateway-github-token"
 GATEWAY_MANIFEST="$(repo_root)/src/core/argocd/manifests/gateway.yaml"
 
+# k3s's own kubeconfig lives at /etc/rancher/k3s/k3s.yaml, root-readable only — the same reason
+# every other script here needs `sudo` for kubectl at all (see lib/common.sh's PATH comment).
+# `kubectl` itself, as k3s installs it at /usr/local/bin/kubectl, already knows to fall back to
+# that path by default when nothing else is configured. kubeseal is a plain client-go binary with
+# no such k3s-specific default — it needs KUBECONFIG pointed there explicitly, or every call
+# fails with "no configuration has been provided" even though `sudo kubectl` works fine right next
+# to it. Override with KUBESEAL_KUBECONFIG=/path/to/config if your k3s config lives somewhere else.
+K3S_KUBECONFIG="${KUBESEAL_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+
 require_cmd kubeseal
 require_cmd kubectl
 
 [[ -f "$GATEWAY_MANIFEST" ]] || die "Expected to find ${GATEWAY_MANIFEST} — run this from a real checkout."
+[[ -f "$K3S_KUBECONFIG" ]] || die "No kubeconfig at ${K3S_KUBECONFIG} — if k3s's config lives \
+somewhere else on this box, re-run as: KUBESEAL_KUBECONFIG=/path/to/config bash $0"
 
 info "Looking for the sealed-secrets controller in namespace '${SEALED_SECRETS_NAMESPACE}'..."
 CONTROLLER_NAME="$($KUBECTL get deployment -n "$SEALED_SECRETS_NAMESPACE" \
@@ -68,15 +79,17 @@ cleanup() { rm -rf "$work_dir"; }
 trap cleanup EXIT
 
 info "Fetching the cluster's real sealed-secrets public cert (kubeseal --fetch-cert)..."
-# Talks to the Kubernetes API via the same sudo kubectl every other script here uses (kubeseal
-# shells out to kubectl itself for this) — not a network call to the controller's own Service, so
-# no port-forward/Ingress concern like the Keycloak bootstrap scripts have.
-sudo kubeseal --fetch-cert \
+# Talks to the Kubernetes API directly (client-go, not a shell-out to kubectl) — not a network call
+# to the controller's own Service, so no port-forward/Ingress concern like the Keycloak bootstrap
+# scripts have. KUBECONFIG is passed explicitly for the reason K3S_KUBECONFIG's own comment above
+# gives: unlike `sudo kubectl`, kubeseal has no built-in fallback to k3s's config location.
+sudo KUBECONFIG="$K3S_KUBECONFIG" kubeseal --fetch-cert \
   --controller-name "$CONTROLLER_NAME" \
   --controller-namespace "$SEALED_SECRETS_NAMESPACE" \
   > "${work_dir}/pub-cert.pem" \
   || die "kubeseal --fetch-cert failed — confirm the controller name/namespace above are right \
-(${KUBECTL} get pods -n ${SEALED_SECRETS_NAMESPACE})."
+(${KUBECTL} get pods -n ${SEALED_SECRETS_NAMESPACE}), and that ${K3S_KUBECONFIG} is really this \
+cluster's kubeconfig."
 [[ -s "${work_dir}/pub-cert.pem" ]] || die "Fetched cert came back empty."
 
 echo
