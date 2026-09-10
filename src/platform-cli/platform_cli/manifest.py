@@ -32,8 +32,16 @@ same "turn a module.yaml into a running module" conversion `platform module inst
    them back out to build ui-shell's future nav. Values go through `json.dumps()` rather than raw
    f-string interpolation: these are free-form operator text (`displayName` especially), and a
    colon or quote in one would otherwise corrupt the generated YAML — a JSON string is also a valid
-   YAML double-quoted flow scalar, so this needs no new dependency. `proxyTo` deliberately stays
-   unpropagated here — that's item 8's own future pass over this same function, not this one.
+   YAML double-quoted flow scalar, so this needs no new dependency.
+
+   2026-09-10 (feature/module-proxy branch, ui-shell-plan.md item 8): `proxyTo` now propagates too,
+   as `platform.io/proxy-to` — the last of module.yaml's display/deploy metadata to make this trip.
+   Gateway's new `GET /modules/{id}/proxy[/{path}]` route (app/module_proxy.py) reads this annotation
+   back out (via a new `argocd.get_module_proxy_target()`, same "fresh Kubernetes API read, never
+   cached" pattern `list_module_applications()`/`list_module_summaries()` already use) to know which
+   in-cluster Service to forward a module's own UI traffic to. Same `json.dumps()` convention as the
+   other three annotations, even though `proxyTo` is a plain internal URL unlikely to need escaping —
+   consistency with its neighbors is worth more than the one saved line.
 """
 from __future__ import annotations
 
@@ -183,6 +191,7 @@ metadata:
     platform.io/display-name: {json.dumps(manifest.displayName)}
     platform.io/icon: {json.dumps(manifest.icon)}
     platform.io/nav-path: {json.dumps(manifest.navPath)}
+    platform.io/proxy-to: {json.dumps(manifest.proxyTo)}
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:

@@ -160,17 +160,83 @@ Once the sealed value is pushed and the controller has decrypted it into a real 
 (`kubectl -n gateway rollout restart deployment/gateway`) to pick it up — a missing/unconfigured token
 degrades to a `503` on both endpoints (`GitHubDispatchError`), never a crash.
 
+## Reverse-proxying into a module's own UI (2026-09-10, feature/module-proxy branch)
+
+`docs/architecture/ui-shell-plan.md` item 8 — the last item on that build list. `ModuleManifest.proxyTo`
+(every `module.yaml`'s in-cluster-only Service URL) has existed in the schema since day one but was
+deliberately never propagated anywhere; `platform_cli/manifest.py`'s `render_application_manifest()`
+now writes it as the `platform.io/proxy-to` annotation, the same `json.dumps()`-through-annotation
+pattern `displayName`/`icon`/`navPath` already established (item 4). `app/argocd.py`'s new
+`get_module_proxy_target()` reads it back — resolved fresh on every proxied request, never cached or
+baked into a token, so an uninstall mid-session 404s the very next request instead of continuing to
+proxy into a torn-down namespace.
+
+The auth problem this branch actually exists to solve: gateway has been deliberately
+bearer-`Authorization`-header-only from day one (see the CORS section above — "identity stays
+bearer-token-in-`Authorization`-header... never a cookie"), but a plain `<iframe src>` navigation, which
+is how `ModuleDetail.tsx` embeds a module's own UI, structurally cannot send a custom header. `app/
+module_proxy.py` solves this with a short-lived, module-scoped **HS256 JWT** instead of a second
+RS256 keypair or a server-side token store — nothing else ever needs to verify this token type, and
+gateway has no persistence layer that would survive a pod restart or `replicas: >1` anyway.
+`GET /modules/{module_id}/proxy-token` mints one (same auth as `GET /modules` — `require_auth()` only,
+no role gate, since this grants no new capability beyond what a viewer can already see is installed);
+its claims (`module_id`, `workspace`, `user`, `role`, `purpose: "module-proxy"`, `iat`, `exp`) come
+straight from that request's own `derive_headers()` result, never re-derived from a header the proxy
+route structurally can't have. `{GET,POST,PUT,PATCH,DELETE} /modules/{module_id}/proxy[/{path}]` then
+accepts that token as a `?token=` query param, decodes and validates it (expired/invalid → 401; wrong
+`purpose` or a token minted for a *different* `module_id` → 403; module not installed or missing the
+annotation → 404), and streams the request through to the module's own Service — `X-Workspace`/
+`X-User`/`X-Role` sent to the module come from the **token's claims**, with any caller-supplied
+versions of those headers (and any `Authorization` header) stripped first, never trusted from the
+request itself. A second header-sanitization pass strips `X-Frame-Options` and any `frame-ancestors`
+out of a forwarded `Content-Security-Policy` on the way back — gateway's own origin (the frame) differs
+from `ui-shell`'s (the top-level page), so an unmodified module response setting either would silently
+blank the iframe with no error surfaced anywhere.
+
+`ModuleSummary.has_own_ui` (`GET /modules`) is a boolean, not the raw proxy URL — the browser only
+ever needs to know whether to attempt minting a token; the cluster-internal Service DNS name stays
+server-side-only. Since `proxyTo` is a required schema field, this only reads `False` for a module
+installed before this branch merged and not yet reinstalled — same transient-annotation-gap category
+items 4/6 already established for `displayName`/`icon`/`navPath`.
+
+**Known limitation, not fixed by this branch**: the `?token=` query param doesn't propagate to a
+module's own follow-up requests — a relative `<script src>`/`fetch()` the module's returned page issues
+resolves against the current document URL and drops the query string entirely. This branch is only
+provably correct end-to-end against `hello-module`, whose content (stock `nginx:stable`'s default page)
+is self-contained and issues no follow-up requests of its own. A module with real frontend assets or
+backend calls of its own would need a further fix (HTML rewriting to inject the token into relative
+URLs, or a narrowly path-scoped cookie carved out as a deliberate exception) — not something to
+silently assume away.
+
+### Module-proxy signing secret
+
+`GATEWAY_MODULE_PROXY_TOKEN_SECRET` (`app/config.py`'s `module_proxy_token_secret`, blank by default —
+minting refuses up front with a `503` rather than ever signing with an empty key) is an **internal**
+HS256 signing secret gateway both mints and verifies itself — unlike `GATEWAY_GITHUB_TOKEN` above,
+there's no external credential to go create first. Generate and seal it with
+`bootstrap/seal-gateway-module-proxy-secret.sh` (`openssl rand -hex 32`, sealed the same way
+`seal-gateway-github-token.sh` seals the GitHub PAT, into this repo's *second* `SealedSecret` document
+in `argocd/manifests/gateway.yaml`) — see that script's own header for the full steps. Both scripts now
+share `bootstrap/lib/common.sh`'s `replace_sealed_secret_document()` to find and replace only their own
+named document, rather than positionally assuming "the last `SealedSecret` in the file," which is
+exactly what broke once this branch made that file carry two. Rotating this secret invalidates every
+proxy token minted under the old value with nothing to clean up server-side — they're stateless JWTs,
+verified against whatever value gateway currently holds, not looked up anywhere.
+`module_proxy_token_ttl_seconds` (default 300) controls how long a minted token stays valid; not
+currently exposed as its own env var since 5 minutes — long enough to actually look at a module's
+detail page, short enough not to leave a long-lived credential sitting in browser history/access
+logs/a module's own `Referer` header — hasn't needed tuning yet.
+
 ## What's NOT built yet — the rest of ARCHITECTURE.md's gateway scope
 
-Dependency-checking, CORS, the installed-modules registry, the Add-ons page's static catalog, and the
-install/uninstall dispatch mechanism are real now (above), and `ui-shell` itself now calls
-`GET /modules` for its real nav (`docs/architecture/ui-shell-plan.md` item 5, `feature/ui-shell-nav`
-branch, 2026-09-09 — see `src/core/ui-shell/README.md`). Still not built: the Add-ons *page* itself in
-`ui-shell` actually calling the two new endpoints above (its Install button is still disabled), and
-reverse-proxying into other modules' own UIs (ARCHITECTURE.md §3, item 8). This service still proxies
-to exactly one backend, `catalog-service`, at one fixed URL; reverse-proxying into a module's own UI
-(item 8) is future work once `proxyTo` is propagated the same way `displayName`/`icon`/`navPath` are
-here.
+Dependency-checking, CORS, the installed-modules registry, the Add-ons page's static catalog, the
+install/uninstall dispatch mechanism, and reverse-proxying into a module's own UI are all real now
+(above), and `ui-shell` itself now calls `GET /modules` for its real nav
+(`docs/architecture/ui-shell-plan.md` item 5, `feature/ui-shell-nav` branch, 2026-09-09 — see
+`src/core/ui-shell/README.md`). That closes out every item on `ui-shell-plan.md`'s build list; what's
+left is what that plan never promised — see ARCHITECTURE.md's own gaps (multi-cluster, a real
+observability stack, etc.) and `docs/known-issues.md` for everything found live along the way that
+wasn't in scope to fix as part of getting there.
 
 NetworkPolicy enforcement isolating catalog-service's namespace ingress to gateway's namespace only is
 also deferred — see `docs/known-issues.md`. k3s's bundled Network Policy controller is enabled by

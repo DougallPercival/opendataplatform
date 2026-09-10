@@ -83,6 +83,42 @@ def sign_token(rsa_keypair: RSAPrivateKey):
     return _sign
 
 
+@pytest.fixture
+def module_proxy_secret(monkeypatch):
+    """Points settings.module_proxy_token_secret at a fixed test value — shared by test_module_proxy.py
+    (both the mint endpoint and the proxy route itself) and by sign_proxy_token below, which needs the
+    SAME secret to hand-craft tokens app/module_proxy.py's _decode_proxy_token() will actually accept."""
+    # >=32 bytes — PyJWT's own InsecureKeyLengthWarning threshold for HS256 (RFC 7518 §3.2); the real
+    # secret (bootstrap/seal-gateway-module-proxy-secret.sh's `openssl rand -hex 32`, used as the raw
+    # 64-character hex string, not decoded) is comfortably above this too.
+    secret = "test-module-proxy-secret-0123456789"
+    monkeypatch.setattr(settings, "module_proxy_token_secret", secret)
+    return secret
+
+
+@pytest.fixture
+def sign_proxy_token(module_proxy_secret):
+    """Like sign_token above, but for app/module_proxy.py's HS256 module-proxy tokens — hands back a
+    function so each test can build a token with its own overrides (expired, wrong module_id, wrong
+    purpose, missing a required claim) rather than one fixed default shape. Requires
+    module_proxy_secret so a test using this fixture doesn't also need to request that one by name."""
+
+    def _sign(module_id: str = "hello-module", *, expires_in: int = 300, **overrides) -> str:
+        payload = {
+            "module_id": module_id,
+            "workspace": "personal",
+            "user": "alice",
+            "role": "editor",
+            "purpose": "module-proxy",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + expires_in,
+        }
+        payload.update(overrides)
+        return jwt.encode(payload, module_proxy_secret, algorithm="HS256")
+
+    return _sign
+
+
 @pytest.fixture(scope="session")
 def self_signed_ca_pem() -> bytes:
     """A real, syntactically-valid self-signed CA certificate in PEM form —

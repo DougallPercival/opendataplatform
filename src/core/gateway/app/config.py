@@ -128,6 +128,28 @@ class Settings(BaseSettings):
     # against test/main" anywhere else in this repo either.
     github_dispatch_ref: str = "dev"
 
+    # ui-shell-plan.md item 8 (feature/module-proxy, 2026-09-10) — app/module_proxy.py's short-lived,
+    # module-scoped proxy tokens (GET /modules/{id}/proxy-token, verified by the GET|POST|PUT|PATCH|
+    # DELETE /modules/{id}/proxy[/{path}] route). A stateless HS256 JWT signed with THIS secret, not a
+    # second RS256 keypair (nothing outside gateway ever verifies this token type — publishing a JWKS
+    # for one gateway-internal, seconds-lived token would be new infrastructure for no real benefit)
+    # and not a server-side token store (gateway has no persistence layer, and an in-memory map
+    # wouldn't survive a pod restart or a future `replicas: >1`). Deliberately blank by default, same
+    # "missing -> a clear, distinct error, not a crash" shape github_token above already uses: minting
+    # should refuse up front rather than sign with an empty key. In a real Deployment this comes from
+    # a SealedSecret-backed Secret via secretKeyRef (argocd/manifests/gateway.yaml,
+    # GATEWAY_MODULE_PROXY_TOKEN_SECRET) — see bootstrap/seal-gateway-module-proxy-secret.sh, which
+    # GENERATES this value (openssl rand -hex 32) rather than prompting for one the way
+    # seal-gateway-github-token.sh does: this isn't an external credential like a GitHub PAT, nothing
+    # outside gateway itself ever needs to know it.
+    module_proxy_token_secret: str = ""
+    # 5 minutes: long enough to actually look at a module's detail page, short enough not to leave a
+    # long-lived credential sitting in a URL (browser history, gateway access logs, and any Referer
+    # header the module's own content generates are all more exposed for a query-string token than an
+    # Authorization header — a real, accepted trade-off of embedding it in the iframe's src, not
+    # something this setting can fix). Minted once per ModuleDetail page view, never refreshed.
+    module_proxy_token_ttl_seconds: int = 300
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(" ") if o.strip()]

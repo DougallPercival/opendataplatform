@@ -46,8 +46,8 @@ to show a disabled state with why, and `check-requirements` above already owns t
 ever passes the raw list through).
 
 `POST /modules/{module_id}/install` and `POST /modules/{module_id}/uninstall` — ui-shell-plan.md
-item 7's mutation mechanism (feature/gateway-module-lifecycle-dispatch, 2026-09-10), backend only:
-the Add-ons page's Install button still isn't wired up to call these, a separate future branch. Both
+item 7's mutation mechanism (feature/gateway-module-lifecycle-dispatch, 2026-09-10, backend), wired up
+to the Add-ons page's Install/Remove buttons by feature/ui-shell-addons-mutation the same day. Both
 require `require_role(derived, "editor")` on top of `require_auth`'s usual membership check —
 gateway's first endpoints to gate on role rather than membership alone. On success, both dispatch
 `app/github_dispatch.py`'s `trigger_module_workflow()` and return 202 immediately — fire-and-forget;
@@ -60,6 +60,13 @@ caller of the one place this comparison lives, not a second implementation of it
 already-installed module (`platform_cli/manifest.py`'s own docstring: reinstalling is safe, "it
 overwrites this file in place"). `uninstall` 404s for a `module_id` with no live Application — the
 same "isn't installed" case `platform module uninstall` itself already refuses.
+
+`GET /modules`'s `has_own_ui` field (ui-shell-plan.md item 8, feature/module-proxy, 2026-09-10) tells
+ui-shell whether to attempt `GET /modules/{id}/proxy-token` — see `app/module_proxy.py` for the actual
+token-minting endpoint and the `GET|POST|PUT|PATCH|DELETE /modules/{id}/proxy[/{path}]` reverse-proxy
+route it authorizes, both deliberately a separate module from this one (registry/lifecycle concerns)
+and from `app/proxy.py` (one fixed, startup-known backend; module_proxy.py resolves a different
+backend per request).
 """
 from __future__ import annotations
 
@@ -149,6 +156,9 @@ async def list_modules(
                 "icon": m.icon,
                 "nav_path": m.nav_path,
                 "status": m.status,
+                # ui-shell-plan.md item 8 (feature/module-proxy, 2026-09-10) — whether
+                # GET /modules/{id}/proxy-token (app/module_proxy.py) has anywhere to forward to.
+                "has_own_ui": m.has_own_ui,
             }
             for m in modules
         ]

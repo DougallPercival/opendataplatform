@@ -259,6 +259,7 @@ def test_lists_an_installed_module_with_its_annotations(jwk_dict, auth_header, m
                     "platform.io/display-name": "Hello Module",
                     "platform.io/icon": "wave",
                     "platform.io/nav-path": "/hello",
+                    "platform.io/proxy-to": "http://hello-module.hello-module.svc:80",
                 },
             )
         ]
@@ -276,6 +277,7 @@ def test_lists_an_installed_module_with_its_annotations(jwk_dict, auth_header, m
                 "icon": "wave",
                 "nav_path": "/hello",
                 "status": "Healthy",
+                "has_own_ui": True,
             }
         ]
     }
@@ -301,6 +303,7 @@ def test_falls_back_gracefully_for_an_application_with_no_annotations(jwk_dict, 
                 "icon": "puzzle",
                 "nav_path": None,
                 "status": "Healthy",
+                "has_own_ui": False,
             }
         ]
     }

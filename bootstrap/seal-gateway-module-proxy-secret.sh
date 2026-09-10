@@ -1,26 +1,18 @@
 #!/usr/bin/env bash
-# One-time: seals a fine-grained GitHub Personal Access Token into
-# src/core/argocd/manifests/gateway.yaml's SealedSecret (ui-shell-plan.md item 7's mutation
-# mechanism, feature/gateway-module-lifecycle-dispatch branch, 2026-09-10) — this repo's FIRST real
-# use of sealed-secrets, deployed since day one (apps/core/sealed-secrets.yaml) but never actually
-# sealed anything before now.
+# One-time: generates and seals gateway's HS256 module-proxy signing secret into
+# src/core/argocd/manifests/gateway.yaml's SECOND SealedSecret document (ui-shell-plan.md item 8,
+# feature/module-proxy branch, 2026-09-10) — app/module_proxy.py's short-lived, module-scoped
+# proxy tokens (the `?token=` an embedded module UI iframe uses instead of an Authorization header,
+# since a plain <iframe src> navigation can't send a custom header — see that file's own module
+# docstring for the full "why").
 #
-# Before running this: create the PAT on GitHub yourself — Settings -> Developer settings -> Fine-
-# grained tokens -> Generate new token, "Only select repositories" -> this repo, Repository
-# permissions -> Actions: Read and write, and NOTHING else (no Contents permission — the actual
-# git commit/push happens inside the triggered workflow's own ephemeral GITHUB_TOKEN, gateway's PAT
-# never touches this repo's contents). See gateway/README.md's own "GitHub PAT for the module-
-# lifecycle dispatch" section for the same instructions in one more place.
-#
-# What this script does: prompts for that PAT (read, never a CLI arg or env var — so it never lands
-# in shell history or `ps`), fetches YOUR cluster's real sealed-secrets public cert (kubeseal only
-# encrypts correctly against the specific cluster that will decrypt it — nothing this script
-# produces on a different cluster, or without this step, would ever actually work), seals it, and
-# replaces the placeholder SealedSecret document at the bottom of
-# src/core/argocd/manifests/gateway.yaml with the real one. You still commit and push that file
-# yourself — this script never touches git, same "one-time cluster setup, not something GitOps
-# applies" category as the keycloak-bootstrap-*.sh scripts (see keycloak-bootstrap-cli-client.sh's
-# own header for that same reasoning, applied there to a Keycloak client instead of a Secret).
+# Unlike seal-gateway-github-token.sh's PAT, there's nothing to go create externally first: this is
+# a random signing secret gateway both mints AND verifies itself, so this script GENERATES the
+# plaintext (`openssl rand -hex 32`) rather than prompting for one. Sibling script, same structure,
+# same shared replace_sealed_secret_document helper (lib/common.sh) for finding and replacing only
+# ITS OWN SealedSecret document by name — never positionally as "the last one in the file", which
+# is exactly the bug that having two such documents in this file exposed (see that helper's own
+# comment for the full story).
 #
 # Requirements (checked via require_cmd — dies immediately if missing, not partway through):
 #   - kubectl reaching your cluster (uses sudo, same as every other bootstrap script here)
@@ -29,9 +21,12 @@
 #     locally. Install: https://github.com/bitnami-labs/sealed-secrets#homebrew (macOS) or the
 #     "Installation" section there for Linux — grab a release binary matching the controller's own
 #     chart version (2.19.3, appVersion 0.39.1 — see apps/core/sealed-secrets.yaml's own comment).
+#   - openssl — used only for `openssl rand -hex 32`, present on essentially every Linux/macOS box.
 #
-# Safe to re-run: each run seals a fresh PAT and overwrites the previous SealedSecret document —
-# useful for rotating the token later, not just the first time.
+# Safe to re-run: each run generates a FRESH random secret and overwrites the previous SealedSecret
+# document — useful for rotating it later, not just the first time. Rotating it invalidates every
+# proxy token minted under the old secret (they're stateless JWTs verified against this value, not
+# looked up anywhere) — nothing to clean up server-side, the next mint just signs with the new one.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,20 +37,16 @@ source "${SCRIPT_DIR}/lib/common.sh"
 KUBECTL="sudo /usr/local/bin/kubectl"
 SEALED_SECRETS_NAMESPACE="sealed-secrets"
 TARGET_NAMESPACE="gateway"
-SECRET_NAME="gateway-github-token"
+SECRET_NAME="gateway-module-proxy-secret"
 GATEWAY_MANIFEST="$(repo_root)/src/core/argocd/manifests/gateway.yaml"
 
-# k3s's own kubeconfig lives at /etc/rancher/k3s/k3s.yaml, root-readable only — the same reason
-# every other script here needs `sudo` for kubectl at all (see lib/common.sh's PATH comment).
-# `kubectl` itself, as k3s installs it at /usr/local/bin/kubectl, already knows to fall back to
-# that path by default when nothing else is configured. kubeseal is a plain client-go binary with
-# no such k3s-specific default — it needs KUBECONFIG pointed there explicitly, or every call
-# fails with "no configuration has been provided" even though `sudo kubectl` works fine right next
-# to it. Override with KUBESEAL_KUBECONFIG=/path/to/config if your k3s config lives somewhere else.
+# Same K3S_KUBECONFIG reasoning as seal-gateway-github-token.sh's own comment on this line —
+# kubeseal has no k3s-specific config fallback the way `sudo kubectl` does.
 K3S_KUBECONFIG="${KUBESEAL_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 
 require_cmd kubeseal
 require_cmd kubectl
+require_cmd openssl
 
 [[ -f "$GATEWAY_MANIFEST" ]] || die "Expected to find ${GATEWAY_MANIFEST} — run this from a real checkout."
 [[ -f "$K3S_KUBECONFIG" ]] || die "No kubeconfig at ${K3S_KUBECONFIG} — if k3s's config lives \
@@ -79,10 +70,9 @@ cleanup() { rm -rf "$work_dir"; }
 trap cleanup EXIT
 
 info "Fetching the cluster's real sealed-secrets public cert (kubeseal --fetch-cert)..."
-# Talks to the Kubernetes API directly (client-go, not a shell-out to kubectl) — not a network call
-# to the controller's own Service, so no port-forward/Ingress concern like the Keycloak bootstrap
-# scripts have. KUBECONFIG is passed explicitly for the reason K3S_KUBECONFIG's own comment above
-# gives: unlike `sudo kubectl`, kubeseal has no built-in fallback to k3s's config location.
+# Same reasoning as seal-gateway-github-token.sh's own comment here: talks to the Kubernetes API
+# directly (client-go), and needs KUBECONFIG passed explicitly since kubeseal has no k3s-specific
+# fallback the way `sudo kubectl` does.
 sudo KUBECONFIG="$K3S_KUBECONFIG" kubeseal --fetch-cert \
   --controller-name "$CONTROLLER_NAME" \
   --controller-namespace "$SEALED_SECRETS_NAMESPACE" \
@@ -92,28 +82,26 @@ sudo KUBECONFIG="$K3S_KUBECONFIG" kubeseal --fetch-cert \
 cluster's kubeconfig."
 [[ -s "${work_dir}/pub-cert.pem" ]] || die "Fetched cert came back empty."
 
-echo
-echo "Paste the fine-grained GitHub PAT (Actions: read/write, this repo only) — input is hidden,"
-echo "and this is never written to shell history or a CLI argument:"
-read -r -s -p "GitHub PAT: " GITHUB_PAT
-echo
-[[ -n "$GITHUB_PAT" ]] || die "No token entered."
+info "Generating a fresh 256-bit signing secret (openssl rand -hex 32)..."
+# A 64-char hex string — well above HS256's RFC 7518 §3.2 minimum key length (32 bytes), so
+# PyJWT never raises InsecureKeyLengthWarning against it. Never echoed to the terminal or written
+# anywhere but straight into kubeseal's stdin below.
+MODULE_PROXY_SECRET="$(openssl rand -hex 32)"
 
 info "Sealing it for '${SECRET_NAME}' in namespace '${TARGET_NAMESPACE}'..."
 $KUBECTL create secret generic "$SECRET_NAME" \
   --namespace "$TARGET_NAMESPACE" \
-  --from-literal=token="$GITHUB_PAT" \
+  --from-literal=secret="$MODULE_PROXY_SECRET" \
   --dry-run=client -o json \
   | kubeseal --cert "${work_dir}/pub-cert.pem" --format yaml \
   > "${work_dir}/sealed.yaml" \
   || die "kubeseal failed to seal the secret."
-unset GITHUB_PAT
+unset MODULE_PROXY_SECRET
 
-# Replaces only the gateway-github-token SealedSecret document, found by its own metadata.name —
-# not positionally as "the last SealedSecret document in the file" (this file has carried a second
-# one, gateway-module-proxy-secret, since ui-shell-plan.md item 8/feature/module-proxy, 2026-09-10;
-# see replace_sealed_secret_document's own comment in lib/common.sh for why that shortcut broke and
-# what replaced it).
+# Replaces only the gateway-module-proxy-secret SealedSecret document, found by its own
+# metadata.name — see replace_sealed_secret_document's own comment in lib/common.sh for why this
+# has to be name-based rather than "the last SealedSecret document in the file" now that this file
+# carries two.
 replace_sealed_secret_document "$GATEWAY_MANIFEST" "$SECRET_NAME" "${work_dir}/sealed.yaml"
 
 success "Wrote the real SealedSecret into ${GATEWAY_MANIFEST}."

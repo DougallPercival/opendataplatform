@@ -59,12 +59,11 @@ def test_special_characters_in_display_name_do_not_corrupt_the_yaml():
     assert parsed["metadata"]["annotations"]["platform.io/display-name"] == 'Ops: "The Dashboard"'
 
 
-def test_proxy_to_is_not_propagated_into_annotations():
-    # Deliberately out of scope for item 4 — see manifest.py's own module docstring. proxyTo
-    # propagation is item 8's future work, a separate pass over this same function.
+def test_proxy_to_is_propagated_into_annotations():
+    # item 8 (feature/module-proxy, 2026-09-10) — see manifest.py's own module docstring. Was
+    # deliberately out of scope for item 4 (test_proxy_to_is_not_propagated_into_annotations,
+    # this test's former self); item 8's own pass over this function adds it.
     manifest = _manifest(proxyTo="http://hello-module.hello-module.svc:80")
 
-    rendered = _render(manifest)
-    parsed = yaml.safe_load(rendered)
-    assert "platform.io/proxy-to" not in parsed["metadata"]["annotations"]
-    assert "proxyTo" not in rendered
+    parsed = yaml.safe_load(_render(manifest))
+    assert parsed["metadata"]["annotations"]["platform.io/proxy-to"] == "http://hello-module.hello-module.svc:80"

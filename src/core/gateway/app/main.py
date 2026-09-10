@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings, settings
 from app.jwks import JWKSCache
+from app.module_proxy import router as module_proxy_router
 from app.modules import router as modules_router
 from app.proxy import router as proxy_router
 
@@ -115,5 +116,11 @@ def healthz():
 # /modules/check-requirements too. proxy_router stays LAST, after
 # everything else, for that same reason. See proxy.py's own module
 # docstring for the same point.
+#
+# module_proxy_router (app/module_proxy.py, ui-shell-plan.md item 8) sits between the two: its own
+# routes are scoped under the literal /modules/{id}/proxy[/{path}] segment, so registering it before
+# modules_router or after wouldn't actually matter for THOSE two routers not colliding with each other
+# — but it still has to come before proxy_router for the same catch-all reason as modules_router.
 app.include_router(modules_router)
+app.include_router(module_proxy_router)
 app.include_router(proxy_router)

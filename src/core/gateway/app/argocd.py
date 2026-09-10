@@ -161,6 +161,12 @@ class ModuleSummary:
     back for one installed module — display_name/icon/nav_path come from the
     `platform.io/*` annotations `platform_cli/manifest.py`'s
     `render_application_manifest()` writes onto the generated Application.
+
+    2026-09-10 (feature/module-proxy, ui-shell-plan.md item 8): `has_own_ui` added — whether this
+    Application carries a `platform.io/proxy-to` annotation at all. A bool, not the raw URL: ui-shell
+    only ever needs to know whether to attempt fetching a proxy token (app/module_proxy.py), never the
+    module's cluster-internal Service DNS name itself — that stays server-side only, resolved fresh
+    per proxied request by `get_module_proxy_target()` below, never handed to a browser.
     """
 
     module_id: str
@@ -168,6 +174,7 @@ class ModuleSummary:
     icon: str
     nav_path: str | None
     status: str
+    has_own_ui: bool
 
 
 async def list_module_summaries() -> list[ModuleSummary]:
@@ -178,7 +185,11 @@ async def list_module_summaries() -> list[ModuleSummary]:
     reinstalled) carries none of these annotations — falls back to
     `module_id`/`"puzzle"`/`None` rather than erroring, the same "missing
     reads as a real, distinct default" discipline `list_module_applications()`
-    already applies to health status.
+    already applies to health status. Same story for `has_own_ui` (item 8):
+    since `ModuleManifest.proxyTo` is a REQUIRED module.yaml field, every module installed after
+    feature/module-proxy merged always has a `proxy-to` annotation — `has_own_ui` only ever reads
+    `False` for the same "installed before this branch, not yet reinstalled" transient state, not a
+    module that permanently lacks a UI.
     """
     items = await _fetch_module_application_items()
     summaries: list[ModuleSummary] = []
@@ -195,6 +206,30 @@ async def list_module_summaries() -> list[ModuleSummary]:
                 icon=annotations.get("platform.io/icon", "puzzle"),
                 nav_path=annotations.get("platform.io/nav-path"),
                 status=health_status,
+                has_own_ui="platform.io/proxy-to" in annotations,
             )
         )
     return summaries
+
+
+async def get_module_proxy_target(module_id: str) -> str | None:
+    """The cluster-internal Service URL (module.yaml's `proxyTo`, propagated as this Application's
+    `platform.io/proxy-to` annotation by `platform_cli/manifest.py`) that
+    `app/module_proxy.py`'s reverse-proxy route forwards a module's own UI traffic to. `None` covers
+    both "not installed at all" and "installed but no proxy-to annotation yet" (a module installed
+    before feature/module-proxy merged, not yet reinstalled) — the proxy route 404s either way,
+    matching `install_module`'s existing "not a known/ready module" convention; it doesn't need to
+    tell those two cases apart, only whether there's somewhere to forward to right now.
+
+    Deliberately re-resolved fresh on EVERY proxied request, never cached or baked into a minted
+    proxy token — same "never cache, always read fresh" discipline `_fetch_module_application_items()`
+    already applies to the ServiceAccount token itself. This means a module uninstalled mid-session
+    correctly 404s the very next proxied request instead of continuing to forward into a namespace
+    that's being torn down.
+    """
+    items = await _fetch_module_application_items()
+    for item in items:
+        if item.get("metadata", {}).get("name") == module_id:
+            annotations = item.get("metadata", {}).get("annotations") or {}
+            return annotations.get("platform.io/proxy-to")
+    return None
