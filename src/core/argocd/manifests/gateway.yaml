@@ -38,8 +38,18 @@
 # Argo CD `Application` objects to know which modules are actually
 # installed and healthy — the `gateway` ServiceAccount below is bound to a
 # `Role` scoped to exactly that: `get`/`list`/`watch` on
-# `applications.argoproj.io`, in the `argocd` namespace only, no write
-# verbs, no other resource types, no cluster-wide scope. See
+# `applications.argoproj.io`, in the `argocd` namespace only, no other
+# resource types, no cluster-wide scope.
+#
+# Broadened 2026-09-10 (feature/force-cleanup branch) — added the `delete`
+# verb so POST /modules/{id}/force-cleanup (app/modules.py) can call
+# app/argocd.py's delete_module_application() to close the modules-root
+# prune gap (see docs/known-issues.md): a plain Kubernetes API DELETE
+# against the same Application object, using this same ServiceAccount
+# token, in place of the `kubectl delete application <id>` workaround. This
+# is deliberately NOT a separate Argo CD-native REST API credential — one
+# fewer credential shape, and the delete triggers the same
+# resources-finalizer.argocd.argoproj.io cascade either way. See
 # argocd/README.md for the same note in one place other manifests point to.
 # No new env vars needed: app/config.py's k8s_api_url/k8s_sa_token_path/
 # k8s_sa_ca_path/argocd_namespace defaults already match what a real
@@ -180,10 +190,11 @@ spec:
       targetPort: 8080
 ---
 # The repo's first ServiceAccount/Role/RoleBinding — see the RBAC comment on
-# the Deployment above for the full "why." ServiceAccount lives in gateway's
-# own namespace (where the pod runs); the Role/RoleBinding live in `argocd`
-# (where the Applications actually are) — a Role only grants access within
-# its own namespace, so this can't be a single object spanning both.
+# the Deployment above for the full "why," including the 2026-09-10 `delete`
+# broadening. ServiceAccount lives in gateway's own namespace (where the pod
+# runs); the Role/RoleBinding live in `argocd` (where the Applications
+# actually are) — a Role only grants access within its own namespace, so
+# this can't be a single object spanning both.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -193,17 +204,17 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: gateway-read-module-applications
+  name: gateway-module-applications
   namespace: argocd
 rules:
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: gateway-read-module-applications
+  name: gateway-module-applications
   namespace: argocd
 subjects:
   - kind: ServiceAccount
@@ -211,7 +222,7 @@ subjects:
     namespace: gateway
 roleRef:
   kind: Role
-  name: gateway-read-module-applications
+  name: gateway-module-applications
   apiGroup: rbac.authorization.k8s.io
 ---
 # gateway's own Ingress-facing cert (2026-09-02, platform-ingress branch) —

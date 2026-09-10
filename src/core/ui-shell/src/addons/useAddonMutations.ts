@@ -9,7 +9,7 @@ import { useAuth } from '../auth/useAuth'
 import type { AddonEntry } from './api'
 import type { AddonsStatus } from './useAddons'
 import { hasAnyQueued, resolveQueuedMutations, timeOutStaleMutations, type MutationEntry, type MutationsById } from './mutationState'
-import { installModule, uninstallModule, type AddonMutationAction } from './mutations'
+import { forceCleanupModule, installModule, uninstallModule, type AddonMutationAction } from './mutations'
 
 /** How often to re-poll the catalog while anything is queued. Short enough
  * to feel responsive for a workflow that usually finishes in under a
@@ -30,6 +30,14 @@ export interface UseAddonMutationsResult {
   stateFor: (moduleId: string) => MutationEntry | undefined
   install: (moduleId: string) => void
   uninstall: (moduleId: string) => void
+  /** The "Force cleanup" workaround (gateway's POST /modules/{id}/force-cleanup)
+   * made callable — see mutations.ts's forceCleanupModule docstring and
+   * docs/known-issues.md's modules-root prune-gap entry. A successful call
+   * folds back into the same {phase: 'queued', action: 'uninstall'} shape a
+   * fresh uninstall would produce, so the polling/resolution/timeout logic
+   * above handles the rest unmodified — Addons.tsx is the only thing that
+   * needs to know this exists as a distinct action. */
+  forceCleanup: (moduleId: string) => void
 }
 
 /** `entries`/`catalogStatus` should be `useAddons()`'s own return values for
@@ -68,11 +76,14 @@ export function useAddonMutations(
     return () => clearInterval(id)
   }, [states, refetch])
 
+  // `call` is the network function to invoke — decoupled from `action` (which
+  // only labels the resulting MutationEntry/error) so forceCleanup can share
+  // this exact submitting→queued/error flow while hitting a different
+  // endpoint under the same 'uninstall' action label.
   const run = useCallback(
-    (moduleId: string, action: AddonMutationAction) => {
+    (moduleId: string, action: AddonMutationAction, call: (moduleId: string, workspace: string, accessToken: string) => Promise<void>) => {
       if (!tokens || !workspace) return
       setRawStates((prev) => new Map(prev).set(moduleId, { phase: 'submitting', action }))
-      const call = action === 'install' ? installModule : uninstallModule
       call(moduleId, workspace, tokens.accessToken)
         .then(() => {
           setRawStates((prev) => new Map(prev).set(moduleId, { phase: 'queued', action, queuedAt: Date.now() }))
@@ -86,7 +97,8 @@ export function useAddonMutations(
 
   return {
     stateFor: (moduleId) => states.get(moduleId),
-    install: (moduleId) => run(moduleId, 'install'),
-    uninstall: (moduleId) => run(moduleId, 'uninstall'),
+    install: (moduleId) => run(moduleId, 'install', installModule),
+    uninstall: (moduleId) => run(moduleId, 'uninstall', uninstallModule),
+    forceCleanup: (moduleId) => run(moduleId, 'uninstall', forceCleanupModule),
   }
 }

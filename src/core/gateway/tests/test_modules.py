@@ -23,6 +23,13 @@ dispatch call itself via respx (`_mock_dispatch`) — same "mock at the real HTT
 as the Kubernetes API and Keycloak JWKS above, not a monkeypatched trigger_module_workflow(). The
 `github_token` fixture points settings.github_token at a fake value; its absence (used deliberately
 in one test) exercises the real "PAT not configured yet" 503 path.
+
+POST /modules/{module_id}/force-cleanup (feature/force-cleanup, 2026-09-10) reuses the same
+auth/role/"is it installed" checks as uninstall above (401/403/404/503-on-list all mirror those
+tests exactly), plus its own respx-mocked DELETE against `_application_url()` for the synchronous
+200-delete path, a 403-from-DELETE-surfaces-as-503 case, and a 404-from-DELETE-is-still-success
+case (mirroring test_argocd.py's own delete_module_application() coverage, one layer up through the
+real endpoint).
 """
 from __future__ import annotations
 
@@ -751,3 +758,117 @@ def test_uninstall_returns_503_when_kubernetes_api_is_unreachable(jwk_dict, auth
             "/modules/hello-module/uninstall", headers={**auth_header, "X-Workspace": "personal"}
         )
     assert response.status_code == 503
+
+
+# --- POST /modules/{module_id}/force-cleanup — feature/force-cleanup, 2026-09-10 ---
+# Same 401/403/404/503 shape as uninstall's tests above (this endpoint reuses the exact same
+# require_auth/require_role/"is it installed" checks), plus its own 200-synchronous-delete path in
+# place of uninstall's 202-dispatch one.
+
+
+def _application_url() -> str:
+    return f"{_k8s_url()}/hello-module"
+
+
+@respx.mock
+def test_force_cleanup_deletes_the_application_and_returns_200(jwk_dict, auth_header, mounted_sa):
+    _mock_jwks(jwk_dict)
+    _mock_k8s([_application("hello-module", "Healthy")])
+    delete_route = respx.delete(_application_url()).mock(return_value=httpx.Response(200))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/force-cleanup", headers={**auth_header, "X-Workspace": "personal"}
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["module_id"] == "hello-module"
+    assert body["action"] == "force-cleanup"
+    assert body["status"] == "deleted"
+    assert delete_route.call_count == 1
+
+
+@respx.mock
+def test_force_cleanup_returns_404_when_module_is_not_installed(jwk_dict, auth_header, mounted_sa):
+    _mock_jwks(jwk_dict)
+    _mock_k8s([])
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/force-cleanup", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 404
+
+
+@respx.mock
+def test_force_cleanup_returns_403_for_a_viewer_role(jwk_dict, sign_token, mounted_sa):
+    _mock_jwks(jwk_dict)
+    with TestClient(app) as client:
+        response = client.post("/modules/hello-module/force-cleanup", headers=_viewer_header(sign_token))
+    assert response.status_code == 403
+
+
+@respx.mock
+def test_force_cleanup_returns_401_for_missing_authorization(mounted_sa):
+    with TestClient(app) as client:
+        response = client.post("/modules/hello-module/force-cleanup", headers={"X-Workspace": "personal"})
+    assert response.status_code == 401
+
+
+@respx.mock
+def test_force_cleanup_returns_503_when_listing_applications_is_unreachable(
+    jwk_dict, auth_header, mounted_sa
+):
+    _mock_jwks(jwk_dict)
+    respx.get(_k8s_url()).mock(side_effect=httpx.ConnectError("connection refused"))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/force-cleanup", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 503
+
+
+@respx.mock
+def test_force_cleanup_returns_503_when_the_delete_call_fails(jwk_dict, auth_header, mounted_sa):
+    # Listing succeeds (module is installed) but the DELETE itself hits a
+    # Kubernetes API error — a 403 here would be exactly what a
+    # misconfigured Role (missing the `delete` verb) produces live.
+    _mock_jwks(jwk_dict)
+    _mock_k8s([_application("hello-module", "Healthy")])
+    respx.delete(_application_url()).mock(return_value=httpx.Response(403, text="Forbidden"))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/force-cleanup", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 503
+
+
+@respx.mock
+def test_force_cleanup_treats_a_404_delete_as_success(jwk_dict, auth_header, mounted_sa):
+    # Already gone by the time the DELETE actually runs (a race, or a
+    # genuine re-click) — the endpoint's own 404 above only fires off the
+    # earlier list call; this proves the DELETE call's own 404 doesn't
+    # surface as a 503.
+    _mock_jwks(jwk_dict)
+    _mock_k8s([_application("hello-module", "Healthy")])
+    respx.delete(_application_url()).mock(return_value=httpx.Response(404, text="not found"))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/force-cleanup", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 200
+    assert response.json()["status"] == "deleted"
+
+
+@respx.mock
+def test_force_cleanup_returns_422_for_an_invalid_module_id(jwk_dict, auth_header, mounted_sa):
+    _mock_jwks(jwk_dict)
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/NotValid/force-cleanup", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 422
