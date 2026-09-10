@@ -191,6 +191,34 @@ section to point at.
    a UI question: does gateway get git push credentials to actually commit
    `modules-enabled/*.yaml` the way `platform-cli` does from the operator's own local git checkout
    today? Nothing in this repo has ever given a *service* write access to its own source repo.
+
+   **Scoped, 2026-09-09** (two decisions with the repo owner, feature/ui-shell-addons branch): (a)
+   this branch builds only the read-only Add-ons *page* — the item-4/5 split repeated once more,
+   item 6 shipped the endpoint with no consumer, this ships the consumer with no mutation; (b) when
+   the mutation mechanism itself is built (a separate future branch), gateway triggers a GitHub
+   Actions `workflow_dispatch` rather than holding a direct git/PAT credential — reusing the same
+   ephemeral, auto-scoped `GITHUB_TOKEN` pattern `ci.yml` already uses for GHCR pushes. Decision (b)
+   is recorded here but not implemented; nothing in this branch triggers a workflow or touches git.
+
+   **✅ Built (read-only page), 2026-09-09 (feature/ui-shell-addons branch)** — new `src/addons/`
+   directory in `ui-shell` (its own top-level concern, alongside `auth/`, `modules/`, `shell/`,
+   `workspace/`), consuming item 6's `GET /modules/catalog` through a hand-rolled hook (`useAddons.ts`,
+   a structural copy of `modules/useModules.ts`). `Addons.tsx` lists every catalog entry — installed
+   or not — with its icon, status badge, and `requires` list as plain text (no satisfaction
+   computation here; `check-requirements` still owns that), a page-level "not built yet" notice, and a
+   disabled `Install` button with a tooltip. An already-installed entry's name links to the existing
+   `/modules/:moduleId` detail page instead of showing the button. `Shell.tsx` gained a `/addons`
+   route and a small nav (`NavLink`, first use in this repo) to reach it. See
+   `src/core/ui-shell/README.md`'s own "Add-ons page" section for the full writeup.
+
+   **Confirmed live, 2026-09-09**, against `homelab-dev` after merge to `dev` and a `rollout restart`:
+   the "Add-ons" nav link appears and routes to `/addons`; `hello-module` renders with its correct
+   icon/name/`requires` ("No dependencies") and its real live status ("Healthy"); the page-level notice
+   and the disabled, tooltipped Install button both render as designed; since `hello-module` is
+   installed, its name links through to the existing `/modules/hello-module` detail page, confirmed
+   still rendering correctly (no regression from the new route/nav); loading `/addons` directly from
+   the URL bar (not just client-side navigation) rendered correctly — the same `nginx.conf` SPA
+   fallback regression check item 5 established, now passing for a second route.
 8. **Reverse-proxying into a module's own UI** ("deep-links into each module's own UI," §2 — the
    only phrase touching this anywhere, undefined beyond that). Needs `proxyTo` actually propagated
    into the deployed `Application` (currently inert, see "What already exists" above) plus a new
@@ -214,9 +242,10 @@ picked up, the same way this doc itself is that scoping pass for item 7 as a who
 ## Open questions this doc deliberately doesn't resolve
 
 - **Same-origin proxying vs. CORS** (item 2) — which one gateway actually implements.
-- **Git push credentials for gateway** (item 7) — the real trust-boundary question behind
-  Install/Remove buttons; today only `platform-cli`, running as the operator locally, ever commits
-  to this repo.
+- **Git push credentials for gateway** (item 7) — **decided 2026-09-09, not yet built**: gateway will
+  trigger a GitHub Actions `workflow_dispatch` rather than hold a direct git/PAT credential, per the
+  writeup under item 7 above. Today only `platform-cli`, running as the operator locally, ever commits
+  to this repo; that stays true until the mutation mechanism itself is a real branch.
 - **Proxy vs. iframe vs. external link** for deep-links into a module's own UI (item 8).
 - **What `PlatformModule` registrations actually are** — ARCHITECTURE.md's one undefined mention
   (§3). Items 4-5 above sidestep needing an answer (they read Argo CD `Application` state directly,
