@@ -93,7 +93,9 @@ workspace change, same "hand-rolled for a narrow mechanism" choice this repo has
 (gateway's raw `httpx`, ui-shell's own PKCE). Clicking a module routes to `/modules/<module_id>`
 (keyed by `module_id`, not raw `nav_path` — `nav_path` is completely unvalidated server-side and can
 be `null`) and shows real live data from the already-fetched list, with an honest note that opening
-the module's own UI is item 8, not built yet — not a fake iframe or dead link. Icons are a small
+the module's own UI is item 8, not built yet — not a fake iframe or dead link. (Item 8 landed
+2026-09-10, `feature/module-proxy` — see that section further down; this note is accurate for this
+branch's own point in time, not the repo's current state.) Icons are a small
 hand-drawn local SVG map (`modules/icons.tsx`) with a fallback glyph, not an icon-library dependency
 — `icon` is a completely free-form string with no enforced value set anywhere in the platform.
 
@@ -128,6 +130,54 @@ there.
 repo, purely for the free active-link styling over plain `Link`) to switch between "Modules" and
 "Add-ons".
 
+## What's built (2026-09-10, feature/ui-shell-addons-mutation branch) — real Install/Remove
+
+The rest of item 7: the Add-ons page's Install/Remove buttons actually call gateway's
+`POST /modules/{id}/install` and `.../uninstall` (`feature/gateway-module-lifecycle-dispatch`, same
+day) instead of sitting disabled. New `src/addons/mutations.ts` (hand-rolled `fetch()` wrapper, same
+"one file per concern" precedent `api.ts`/`useAddons.ts` already set) and `mutationState.ts` — a
+**pure** state machine (`MutationPhase = 'submitting' | 'queued' | 'timed-out' | 'error'`, split out
+specifically so it gets real unit tests, the same `WorkspaceContext.tsx`/`workspaces.ts` split this
+repo already established) — plus `useAddonMutations.ts`, the React wrapper owning one
+`Map<moduleId, MutationEntry>` for the whole page rather than one hook instance per row, so every row
+renders from a single source of truth.
+
+Both endpoints are fire-and-forget (a `202` just means "a workflow was told to start"), so a
+successful call moves a row to `'queued'` and a 5-second poll (`useAddons`' own `refetch`) sweeps the
+catalog for the row's expected end state, up to a 2-minute window before giving up and flipping to
+`'timed-out'` — generous on purpose, since besides the triggered GitHub Actions workflow's own run
+time, Argo CD's reconciliation (and, for uninstall, the `modules-root` prune gap `docs/known-issues.md`
+documents) can genuinely take a while. `Addons.tsx`'s `AddonRow` gained a `confirmingRemove` step
+before an uninstall actually fires (`"Removing can take a few minutes to fully complete"`), and every
+button/note in `AddonRowActions`/`AddonRowNote` now reads live `MutationEntry` state instead of the
+static "isn't built yet" copy the read-only branch above shipped.
+
+## What's built (2026-09-10, feature/module-proxy branch) — a module's own UI, embedded
+
+Item 8 of `ui-shell-plan.md` — the last item on that doc's build list. `ModuleDetail.tsx` renders a
+module's own UI as an embedded `<iframe>` when `module.hasOwnUi` is true (`GET /modules`'s new
+`has_own_ui` field — see `src/core/gateway/README.md`'s matching section for the backend half), or a
+"reinstall to pick this up" notice when it's `false` (a module installed before this branch, same
+transient-annotation-gap shape items 4/6 already established — not a module permanently lacking a UI).
+
+New `useModuleProxyToken.ts` mints a proxy token once per page view via a plain authenticated
+`fetch()` to gateway's new `GET /modules/{id}/proxy-token` (`proxyToken.ts`, structurally identical to
+`mutations.ts`'s hand-rolled-per-endpoint convention), then `ModuleFrame` builds
+`<iframe src=".../modules/{id}/proxy/?token=...">` — a query-param token rather than a header, since a
+plain `<iframe src>` navigation structurally cannot send a custom `Authorization` header and this
+system has never used cookies for identity. Loading/error states follow the same pattern every other
+hook in this repo already uses (`describeProxyTokenError` renders gateway's own `detail` message
+verbatim, mirroring `AddonsListError`).
+
+**Known limitation, inherited from the backend and not fixed here:** the query-string token doesn't
+propagate to a module's own follow-up requests, so this is only provably correct end-to-end against
+`hello-module`'s self-contained stock nginx page — see `src/core/gateway/README.md`'s matching section
+for the full reasoning and what a real fix would need.
+
+**Confirmed live, 2026-09-10:** the iframe rendered `hello-module`'s real page inline against
+`homelab-dev`, after hitting (and fixing) the same mutable-`:dev`-tag stale-pod gotcha documented in
+`docs/known-issues.md` for a second time in as many branches.
+
 ## What's built (2026-09-10, feature/force-cleanup branch) — Force cleanup
 
 `docs/known-issues.md`'s `modules-root` prune-gap workaround (`sudo kubectl -n argocd delete
@@ -155,10 +205,15 @@ own docstrings point to).
 
 ## What's NOT built yet
 
-The actual Install/Remove *action* and its `workflow_dispatch` mechanism (the rest of item 7, now a
-separate future branch — decided, not built), and reverse-proxying into a module's own UI (item 8).
-Each is its own future branch and its own scoping decision, not a checklist to work through in order —
-see `ui-shell-plan.md` for why.
+**`ui-shell-plan.md`'s entire dependency-ordered build list is done** (this section corrected
+2026-09-11 — it had gone stale, still describing item 7's real Install/Remove action and item 8's
+module-proxy as future work well after both shipped and were live-verified; see the sections above).
+
+What's still genuinely open: the module-proxy's query-string-token limitation for a module with real
+frontend assets or its own backend calls (see that section above), and the recurring mutable-`:dev`-
+image-tag stale-pod gotcha (`docs/known-issues.md`) that's bitten three separate branches this
+session. Broader gaps against ARCHITECTURE.md's longer-term vision aren't scoped in this doc — track
+those in `ARCHITECTURE.md`/`docs/known-issues.md` as they come up.
 
 ## Running it locally
 
