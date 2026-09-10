@@ -885,14 +885,39 @@ pvc.yaml`'s own `Delete=false` convention, referenced in `modules-root.yaml`'s c
 **Status:** open, real follow-up work, not a "someday" caveat — every `platform module uninstall`
 hits this identically whether it's run directly by an operator or triggered through gateway's
 dispatch, so it isn't specific to either door. Doesn't block this branch (the dispatch mechanism's own
-job is fully proven). Matters more once a future branch wires the Add-ons page's Remove button to this
-endpoint — a user clicking Remove and seeing the module still listed/running afterward, with no
-visible reason, would be a real point of confusion without this fixed or at least surfaced some other
-way in the UI. Next step when picked back up: reproduce with a plain local `platform module uninstall`
-(no gateway involved at all) to rule out anything about the workflow's own git identity/environment
-being a contributing factor, then actually read Argo CD's sync-task-generation code (or file an
-upstream issue if it turns out to be a genuine Argo CD bug) rather than continuing to guess from
-documentation alone.
+job is fully proven). Next step when picked back up: reproduce with a plain local `platform module
+uninstall` (no gateway involved at all) to rule out anything about the workflow's own git
+identity/environment being a contributing factor, then actually read Argo CD's sync-task-generation
+code (or file an upstream issue if it turns out to be a genuine Argo CD bug) rather than continuing to
+guess from documentation alone.
+
+**Confirmed live again, 2026-09-10, `feature/ui-shell-addons-mutation` branch:** hit identically a
+second time, now through the Add-ons page's real Remove button rather than a raw `curl`. Clicking
+Remove → confirm did trigger a real, successful `module-lifecycle.yml` run (git commit landed,
+`modules-enabled/hello-module.yaml` removed) — same as before, this gap is entirely downstream of the
+dispatch mechanism. The page's own polling correctly never saw the catalog flip to "not installed"
+(since `hello-module`'s `Application` was still sitting there Synced/Healthy against its own chart
+source, orphaned but not gone), and after the 2-minute window its "Still processing — refresh in a
+bit, or try again below" fallback rendered exactly as designed — so at least this is no longer a silent
+"where did it go" moment for whoever's driving the UI, it's an honest "this is taking a while." The
+`kubectl -n argocd delete application <module-id>` workaround, run manually, resolved it immediately
+and the row flipped to "not installed" on the next poll — confirming the workaround still holds through
+this second real exercise.
+
+**Deferred idea, not built:** a "Force cleanup" action — a new, narrowly-scoped gateway endpoint that
+runs the equivalent of the manual `kubectl delete application <module-id>` above, surfaced in the UI
+only once a Remove has actually timed out (so it's a deliberate click on an already-stuck row, never
+automatic). Considered and explicitly not built this session — decided to keep documenting the manual
+workaround for now rather than add scope to a UI branch. The one design decision made in case this gets
+picked up later: if built, the delete should go through Argo CD's own REST API (reusing/broadening the
+same credential `argocd.py` already holds for reading status), not a separate direct-Kubernetes-API
+RBAC grant — one fewer credential shape in the system, and Argo CD's own cascade delete is exactly the
+same `resources-finalizer.argocd.argoproj.io` path the manual workaround already relies on. Also worth
+remembering if this gets built: deleting the `Application` object *immediately* on a Remove click would
+race the workflow's own git push (the workflow takes ~30s to land the commit; if `modules-root`
+reconciles while the manifest file is still present in git, it would just recreate the `Application`
+gateway just deleted) — which is exactly why this needs to be a deliberate post-timeout action, not
+something wired into the mutation flow itself.
 
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
