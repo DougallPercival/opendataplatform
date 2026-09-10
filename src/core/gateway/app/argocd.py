@@ -1,5 +1,5 @@
-"""In-cluster Kubernetes API client for reading Argo CD `Application` health —
-platform-module-deps branch (module-lifecycle-plan.md item 6, 2026-09-03).
+"""In-cluster Kubernetes API client for reading (and, since 2026-09-10, deleting) Argo CD
+`Application` objects — platform-module-deps branch (module-lifecycle-plan.md item 6, 2026-09-03).
 
 `app/modules.py`'s `/modules/check-requirements` endpoint needs to know which
 modules are currently installed-and-healthy. Every module Application
@@ -39,6 +39,13 @@ main.py's `_keycloak_tls_verify()` already uses: outside a real Deployment
 raises `ArgoCDUnavailableError` up front instead of crashing on a
 FileNotFoundError deep inside an httpx call — `app/modules.py` turns that into
 a 503, a legible "can't check requirements right now" rather than a 500.
+
+2026-09-10 (feature/force-cleanup): `delete_module_application()` below is this module's first
+WRITE — `docs/known-issues.md`'s "modules-root doesn't reliably auto-prune a module's Application
+object on uninstall" gap, made clickable instead of requiring a terminal. Reuses the exact same
+ServiceAccount credential every read above already holds (the gateway `Role` broadened to also
+allow `delete`, not a second credential) — see that function's own docstring for the full "why not
+Argo CD's own REST API instead" reasoning.
 """
 from __future__ import annotations
 
@@ -82,13 +89,13 @@ def _read_text(path: str, *, what: str) -> str:
     return p.read_text().strip()
 
 
-async def _fetch_module_application_items() -> list[dict]:
-    """The shared Kubernetes API call both `list_module_applications()` and
-    `list_module_summaries()` build on: list every Application labeled
-    `platform.io/tier=module` in `settings.argocd_namespace`, return the raw
-    `items` list from the response body. Auth/TLS/error-handling live here
-    exactly once — see this module's own docstring for why the token is read
-    fresh every call rather than cached.
+def _service_account_credentials() -> tuple[str, ssl.SSLContext]:
+    """The (bearer token, TLS context) pair every call in this module needs —
+    factored out of `_fetch_module_application_items()` (2026-09-03) once
+    `delete_module_application()` (2026-09-10, feature/force-cleanup) needed
+    the exact same pair for a second HTTP verb against the same API. Token is
+    still read fresh on every call, never cached — see this module's own
+    docstring for why.
     """
     token = _read_text(settings.k8s_sa_token_path, what="ServiceAccount token")
     ca_path = settings.k8s_sa_ca_path
@@ -97,15 +104,32 @@ async def _fetch_module_application_items() -> list[dict]:
             f"ServiceAccount CA bundle not found at {ca_path!r} — not running in-cluster, or the "
             "gateway ServiceAccount isn't mounted (see argocd/manifests/gateway.yaml)."
         )
-
-    url = (
-        f"{settings.k8s_api_url}/apis/argoproj.io/v1alpha1/namespaces/"
-        f"{settings.argocd_namespace}/applications"
-    )
     # httpx>=0.28 deprecated passing `verify=<path-string>` directly (it still
     # works, just warns) in favor of building the SSLContext explicitly —
     # doing that here rather than leaving the warning in every test run.
-    ssl_context = ssl.create_default_context(cafile=ca_path)
+    return token, ssl.create_default_context(cafile=ca_path)
+
+
+def _applications_url(module_id: str | None = None) -> str:
+    """The Kubernetes API URL for either the Application collection (list) or
+    one named Application (get/delete) in `settings.argocd_namespace`."""
+    base = (
+        f"{settings.k8s_api_url}/apis/argoproj.io/v1alpha1/namespaces/"
+        f"{settings.argocd_namespace}/applications"
+    )
+    return base if module_id is None else f"{base}/{module_id}"
+
+
+async def _fetch_module_application_items() -> list[dict]:
+    """The shared Kubernetes API call both `list_module_applications()` and
+    `list_module_summaries()` build on: list every Application labeled
+    `platform.io/tier=module` in `settings.argocd_namespace`, return the raw
+    `items` list from the response body. Auth/TLS/error-handling live here
+    exactly once — see this module's own docstring for why the token is read
+    fresh every call rather than cached.
+    """
+    token, ssl_context = _service_account_credentials()
+    url = _applications_url()
     try:
         async with httpx.AsyncClient(verify=ssl_context, timeout=settings.upstream_timeout_seconds) as client:
             response = await client.get(
@@ -233,3 +257,50 @@ async def get_module_proxy_target(module_id: str) -> str | None:
             annotations = item.get("metadata", {}).get("annotations") or {}
             return annotations.get("platform.io/proxy-to")
     return None
+
+
+async def delete_module_application(module_id: str) -> None:
+    """`docs/known-issues.md`'s "Force cleanup" — the manual `sudo kubectl -n argocd delete
+    application <module-id>` workaround for the `modules-root` prune gap, made callable from
+    `app/modules.py`'s `POST /modules/{module_id}/force-cleanup` instead of requiring a terminal.
+
+    A plain Kubernetes API DELETE against this Application, nothing more: no special cascade/
+    propagation options, because plain `kubectl delete` doesn't pass any either, and the whole point
+    is reproducing that exact, already-proven-safe operation. The Application already carries the
+    `resources-finalizer.argocd.argoproj.io` finalizer Argo CD's own controller put there on
+    creation — that finalizer is what actually cascades the delete to the underlying Deployment/
+    Service (etc.) before letting the Application object itself disappear, entirely independent of
+    which client (this function, or a human's `kubectl`) issued the DELETE that started it.
+
+    2026-09-10 (feature/force-cleanup): deliberately NOT a call to Argo CD's own REST API
+    (`argocd-server`) with a separate Argo CD-native credential — broadening the gateway
+    ServiceAccount's existing (until now read-only) Role to also allow `delete` on
+    `applications.argoproj.io` (see `argocd/manifests/gateway.yaml`'s RBAC comment) reuses the exact
+    credential `_fetch_module_application_items()` above already holds, needs no new SealedSecret/
+    bootstrap script/settings, and produces the identical outcome (same finalizer, same cascade) —
+    "one fewer credential shape in the system" that this feature's own design note in
+    `docs/known-issues.md` called for, just via the Kubernetes API rather than Argo CD's HTTP one.
+
+    Does not check the Application exists first — `app/modules.py`'s caller already does that (the
+    same `list_module_applications()` check `uninstall_module` uses) to produce a proper 404 with a
+    clear message. If the Application is somehow already gone by the time this actually runs (a race
+    with something else deleting it, or a genuine re-click), the Kubernetes API's own 404 here is
+    treated as success — the end state ("no orphaned Application") is exactly what force-cleanup was
+    asked to produce, so there's nothing to surface as an error.
+    """
+    token, ssl_context = _service_account_credentials()
+    url = _applications_url(module_id)
+    try:
+        async with httpx.AsyncClient(verify=ssl_context, timeout=settings.upstream_timeout_seconds) as client:
+            response = await client.delete(url, headers={"Authorization": f"Bearer {token}"})
+    except httpx.HTTPError as exc:
+        raise ArgoCDUnavailableError(f"Couldn't reach the Kubernetes API at {url!r}: {exc}") from exc
+
+    if response.status_code == 404:
+        return
+
+    if response.status_code not in (200, 202):
+        raise ArgoCDUnavailableError(
+            f"Kubernetes API returned {response.status_code} deleting Application {module_id!r} "
+            f"(namespace={settings.argocd_namespace!r}): {response.text[:500]}"
+        )

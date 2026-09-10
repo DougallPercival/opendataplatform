@@ -204,3 +204,58 @@ async def test_list_module_summaries_has_own_ui_reflects_proxy_to_annotation(mou
     summaries = {s.module_id: s.has_own_ui for s in await argocd.list_module_summaries()}
 
     assert summaries == {"hello-module": True, "old-module": False}
+
+
+# --- delete_module_application() — Force cleanup, feature/force-cleanup, 2026-09-10 ---
+
+APPLICATION_URL = f"{K8S_URL}/hello-module"
+
+
+@respx.mock
+async def test_delete_module_application_sends_a_plain_delete(mounted_sa):
+    route = respx.delete(APPLICATION_URL).mock(return_value=httpx.Response(200))
+
+    await argocd.delete_module_application("hello-module")
+
+    assert route.call_count == 1
+    request = route.calls[0].request
+    assert request.headers["authorization"] == "Bearer fake-sa-token"
+    # No cascade/propagation query params — see the function's own docstring
+    # for why this deliberately mirrors a bare `kubectl delete`.
+    assert len(request.url.params) == 0
+
+
+@respx.mock
+async def test_delete_module_application_accepts_202(mounted_sa):
+    # The Kubernetes API can return 202 for a delete still processing behind
+    # a finalizer — this is success too, not something the caller should see
+    # as an error.
+    respx.delete(APPLICATION_URL).mock(return_value=httpx.Response(202))
+
+    await argocd.delete_module_application("hello-module")
+
+
+@respx.mock
+async def test_delete_module_application_treats_404_as_success(mounted_sa):
+    # Already gone (a race, or a genuine re-click) — the end state
+    # force-cleanup was asked to produce already holds, so this must not
+    # raise.
+    respx.delete(APPLICATION_URL).mock(return_value=httpx.Response(404, text="not found"))
+
+    await argocd.delete_module_application("hello-module")
+
+
+@respx.mock
+async def test_delete_module_application_raises_on_other_non_2xx(mounted_sa):
+    respx.delete(APPLICATION_URL).mock(return_value=httpx.Response(403, text="Forbidden"))
+
+    with pytest.raises(argocd.ArgoCDUnavailableError, match="403"):
+        await argocd.delete_module_application("hello-module")
+
+
+@respx.mock
+async def test_delete_module_application_connection_failure_raises_argocd_unavailable(mounted_sa):
+    respx.delete(APPLICATION_URL).mock(side_effect=httpx.ConnectError("connection refused"))
+
+    with pytest.raises(argocd.ArgoCDUnavailableError, match="Couldn't reach"):
+        await argocd.delete_module_application("hello-module")

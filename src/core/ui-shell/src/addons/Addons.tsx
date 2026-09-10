@@ -35,7 +35,21 @@ const MUTATION_ROLES = new Set(['owner', 'editor'])
  * feature/gateway-module-lifecycle-dispatch — already live-verified end to
  * end against homelab-dev). Both endpoints are fire-and-forget (a 202 just
  * means "queued"); useAddonMutations is what turns that into something this
- * page can actually show someone. */
+ * page can actually show someone.
+ *
+ * feature/force-cleanup adds a third action: once an uninstall's polling
+ * window times out, AddonRowActions swaps the row's button for "Force
+ * cleanup," wired to gateway's POST /modules/{id}/force-cleanup — the
+ * clickable version of the `kubectl delete application <id>` workaround for
+ * the modules-root prune gap (docs/known-issues.md). Deliberately never
+ * fired automatically here: only a human clicking it after seeing the
+ * timeout note, never the timeout itself — an uninstall's own workflow can
+ * still be mid-flight (its git push lands ~30s after dispatch) when the
+ * poll timeout fires, and deleting the Application while that push is still
+ * in-flight risks modules-root recreating it right back. Waiting for a
+ * click, not auto-firing on timeout, is what avoids that race — see
+ * app/modules.py's force_cleanup_module docstring for the endpoint side of
+ * this. */
 export function Addons() {
   const { logout } = useAuth()
   const { workspaces, selected } = useWorkspace()
@@ -74,6 +88,7 @@ export function Addons() {
             mutation={mutations.stateFor(entry.moduleId)}
             onInstall={mutations.install}
             onUninstall={mutations.uninstall}
+            onForceCleanup={mutations.forceCleanup}
           />
         ))}
       </ul>
@@ -87,12 +102,14 @@ function AddonRow({
   mutation,
   onInstall,
   onUninstall,
+  onForceCleanup,
 }: {
   entry: AddonEntry
   canMutate: boolean
   mutation: MutationEntry | undefined
   onInstall: UseAddonMutationsResult['install']
   onUninstall: UseAddonMutationsResult['uninstall']
+  onForceCleanup: UseAddonMutationsResult['forceCleanup']
 }) {
   const installed = entry.status !== NOT_INSTALLED_STATUS
   const requiresText = entry.requires.length > 0 ? `Requires: ${entry.requires.join(', ')}` : 'No dependencies'
@@ -127,6 +144,7 @@ function AddonRow({
           setConfirmingRemove(false)
           onUninstall(entry.moduleId)
         }}
+        onForceCleanup={() => onForceCleanup(entry.moduleId)}
       />
     </li>
   )
@@ -144,6 +162,20 @@ function AddonRowNote({ mutation }: { mutation: MutationEntry | undefined }) {
   }
 
   if (mutation.phase === 'timed-out') {
+    // Uninstalls get more specific copy: this is the one phase/action
+    // combination that unlocks a real next step (Force cleanup, rendered by
+    // AddonRowActions below) rather than just "try again," because a stuck
+    // uninstall is very often the modules-root prune gap documented in
+    // docs/known-issues.md, not a workflow failure — waiting longer rarely
+    // helps, deleting the leftover Application object does.
+    if (mutation.action === 'uninstall') {
+      return (
+        <span className={styles.mutationNote}>
+          Still removing after a while — this can be Argo CD being slow to clean up. Try{' '}
+          <strong>Force cleanup</strong> below if it doesn't resolve on its own.
+        </span>
+      )
+    }
     return <span className={styles.mutationNote}>Still processing — refresh in a bit to check, or try again below.</span>
   }
 
@@ -175,6 +207,7 @@ function AddonRowActions({
   onCancelRemove,
   onInstall,
   onUninstall,
+  onForceCleanup,
 }: {
   installed: boolean
   canMutate: boolean
@@ -184,6 +217,7 @@ function AddonRowActions({
   onCancelRemove: () => void
   onInstall: () => void
   onUninstall: () => void
+  onForceCleanup: () => void
 }) {
   if (!canMutate) {
     return (
@@ -201,8 +235,23 @@ function AddonRowActions({
     )
   }
 
-  // 'timed-out', 'error', and no mutation at all (idle) all fall through to
-  // a normal, clickable button below — neither of the first two should leave
+  // A timed-out uninstall gets its own button instead of falling through to
+  // the generic Remove-with-confirm flow below: re-clicking Remove would just
+  // re-dispatch the same uninstall workflow gateway already ran (and, per
+  // docs/known-issues.md, likely already succeeded at — this is a prune gap,
+  // not a failed workflow), while Force cleanup calls the endpoint that
+  // actually clears the leftover Application object. No confirm step here —
+  // this only ever appears after the user already confirmed a Remove once.
+  if (installed && mutation?.phase === 'timed-out' && mutation.action === 'uninstall') {
+    return (
+      <button type="button" className={styles.dangerButton} onClick={onForceCleanup} title="Delete the leftover Argo CD Application object directly, skipping the stuck uninstall workflow">
+        Force cleanup
+      </button>
+    )
+  }
+
+  // 'timed-out' installs, 'error', and no mutation at all (idle) all fall
+  // through to a normal, clickable button below — none of these should leave
   // a row stuck forever.
 
   if (!installed) {

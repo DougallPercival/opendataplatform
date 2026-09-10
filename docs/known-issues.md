@@ -904,20 +904,37 @@ bit, or try again below" fallback rendered exactly as designed — so at least t
 and the row flipped to "not installed" on the next poll — confirming the workaround still holds through
 this second real exercise.
 
-**Deferred idea, not built:** a "Force cleanup" action — a new, narrowly-scoped gateway endpoint that
-runs the equivalent of the manual `kubectl delete application <module-id>` above, surfaced in the UI
-only once a Remove has actually timed out (so it's a deliberate click on an already-stuck row, never
-automatic). Considered and explicitly not built this session — decided to keep documenting the manual
-workaround for now rather than add scope to a UI branch. The one design decision made in case this gets
-picked up later: if built, the delete should go through Argo CD's own REST API (reusing/broadening the
-same credential `argocd.py` already holds for reading status), not a separate direct-Kubernetes-API
-RBAC grant — one fewer credential shape in the system, and Argo CD's own cascade delete is exactly the
-same `resources-finalizer.argocd.argoproj.io` path the manual workaround already relies on. Also worth
-remembering if this gets built: deleting the `Application` object *immediately* on a Remove click would
-race the workflow's own git push (the workflow takes ~30s to land the commit; if `modules-root`
-reconciles while the manifest file is still present in git, it would just recreate the `Application`
-gateway just deleted) — which is exactly why this needs to be a deliberate post-timeout action, not
-something wired into the mutation flow itself.
+**Built, 2026-09-10, `feature/force-cleanup` branch:** the "Force cleanup" action sketched below is
+real now — `POST /modules/{module_id}/force-cleanup` (`src/core/gateway/README.md`'s own section,
+`app/modules.py`/`app/argocd.py`'s `delete_module_application()`), surfaced in the Add-ons page only
+once a Remove has actually timed out, exactly as originally planned (`src/core/ui-shell/README.md`'s
+Force cleanup section) — a deliberate click on an already-stuck row, never automatic, for the same
+git-push-race reason called out below.
+
+One correction against the design note this entry originally recorded: the delete goes through a
+**broadened Kubernetes RBAC grant on the existing gateway ServiceAccount** (added the `delete` verb
+to its `Role` in `argocd/manifests/gateway.yaml`), not Argo CD's own REST API. Raised explicitly with
+the repo owner before building, since the original note's literal wording ("Argo CD's own REST API")
+and its stated reasoning ("reusing/broadening the same credential `argocd.py` already holds") were in
+tension — `argocd.py` has only ever held a Kubernetes ServiceAccount token, never an Argo CD-native
+API credential, so "reuse the same credential" and "call Argo CD's REST API" couldn't both be true.
+Confirmed: broaden the Kubernetes RBAC. This is the more literal reading of "one fewer credential
+shape" — no new SealedSecret, no new bootstrap script, no new credential type in the system at all —
+and produces an identical outcome, since a plain Kubernetes `DELETE` against the `Application` object
+triggers the exact same `resources-finalizer.argocd.argoproj.io` cascade Argo CD's own REST API
+delete or a manual `kubectl delete` would.
+
+The git-push race called out when this was still a deferred idea was real and is why the button still
+only ever appears after a timeout, never fires on its own: deleting the `Application` object
+*immediately* on a Remove click would race the workflow's own git push (the workflow takes ~30s to
+land the commit; if `modules-root` reconciles while the manifest file is still present in git, it
+would just recreate the `Application` gateway just deleted).
+
+**Confirmation still needed:** this section will get one more update once the button has actually
+been clicked against a real stuck row on `homelab-dev` and confirmed to leave `kubectl -n argocd get
+application <module-id>` 404ing and the Add-ons row resolving to "not installed" without the manual
+`kubectl delete` workaround — the same live-verification bar every other feature in this doc has
+cleared before being called done.
 
 ### `ui-shell`'s mutable `:dev` image tag means "Synced/Healthy" doesn't prove the new build is actually running
 
