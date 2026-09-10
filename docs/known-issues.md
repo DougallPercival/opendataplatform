@@ -442,22 +442,7 @@ applies on the one machine whose hosts file you edited. Once `platform-gateway` 
 (`192.168.4.240`, from `metallb-pool.yaml`) instead of the homelab box's own address — update or
 remove this entry at that point rather than leaving it pointed at the wrong place.
 
-**Superseded, 2026-09-02 (platform-ingress branch) — confirmed live.** The predicted moment above
-arrived: a real `Ingress` now fronts Keycloak
-(`src/core/argocd/manifests/keycloak-instance.yaml`), and ingress-nginx's LoadBalancer IP came back
-exactly `192.168.4.240` as predicted. The hosts-file fix is still the right one, just pointed at
-that IP instead of the homelab box's own address, and now covers `gateway.platform.local` too
-(gateway got its own `Ingress` in the same branch):
-
-```text
-192.168.4.240  keycloak.platform.local  gateway.platform.local
-```
-
-Browsing to `https://keycloak.platform.local` (standard 443, no port) with that entry in place was
-confirmed to survive past the login page — the exact failure this entry originally documented —
-with zero `kubectl port-forward` processes running anywhere.
-
-### `catalog-service`'s auth was a placeholder — closed at both the application and network layers
+### `catalog-service`'s auth was a placeholder — closed at the application layer, still open at the network layer
 
 Added 2026-09-01, Phase 2 kickoff; updated 2026-09-01 (same day) when role enforcement landed;
 **updated again 2026-09-02 (platform-gateway-auth branch) — the application-layer half of this gap
@@ -486,163 +471,10 @@ branch. A `NetworkPolicy` in `catalog-service`'s namespace allowing ingress only
 `gateway` namespace (matched by namespace label, e.g. `kubernetes.io/metadata.name: gateway`) would
 close it.
 
-**Status:** application-layer gap closed by `platform-gateway-auth`. **Network-layer gap also closed,
-2026-09-03 (`catalog-service-netpol` branch) — confirmed live.** `manifests/catalog-service.yaml`
-now carries a `NetworkPolicy` (`catalog-service-restrict-ingress`) restricting ingress on
-catalog-service's pods to the `gateway` namespace only, on port 8000 — exactly the shape this entry
-named above, `namespaceSelector: kubernetes.io/metadata.name: gateway`, no explicit namespace
-labeling needed.
-
-Live verification, in order: the `catalog-service` Application stayed Synced/Healthy through the
-sync; the decision-4-style kubelet-probe risk this design carried (readinessProbe/livenessProbe hit
-the pod from the kubelet on its own node, not from a pod in any namespace, so a namespaceSelector-only
-rule might not have matched that traffic) turned out to be a non-issue on this cluster's k3s/
-kube-router combination — `RESTARTS` stayed at `0`, `READY` stayed `1/1`, zero new Pod Events, for a
-full minute-plus after the policy landed. No `ipBlock`/node-IP fallback was needed. `platform dataset
-list` through gateway kept working unchanged, confirming the allowed path. And the actual proof: a
-throwaway pod started in the `keycloak` namespace (deliberately *not* `gateway`) got `Connection
-refused` curling `catalog-service.catalog-service.svc.cluster.local:8000` directly — the exact
-in-cluster bypass this whole entry was about, now closed.
-
-**Do not** put `catalog-service` behind an `Ingress`, a `LoadBalancer` Service, or anything else
-reachable off-cluster — that was never in scope and stays out of scope; catalog-service's only front
-door is, and remains, gateway. This entry is now fully resolved: both the application-layer and
-network-layer halves of "anyone who can reach it" are narrowed to "anyone who went through gateway."
-
-### Deleting a published `Function` 500'd — an unnamed FK with no cascade, uncaught
-
-Added and fixed 2026-09-03, `platform-function-promote` branch. Found live via the branch's own
-verification round trip: `platform function create` → `publish` → `versions` → `promote` → `update
---visibility workspace` (demote) all worked, then `platform function delete` came back `gateway
-error (500): Internal Server Error`.
-
-Root cause, in `catalog-service` itself (not anything platform-sdk/platform-cli built this branch):
-`app/models.py`'s `FunctionVersion.function_id` foreign key had no `ondelete=` clause, so Postgres
-defaulted to `NO ACTION` — deleting a `Function` that had at least one published `FunctionVersion`
-row was rejected outright as a foreign-key violation. `app/crud.py`'s generic `delete()` (used by
-`delete_function`) does `db.delete(entity); db.commit()` with no exception handling, so that
-violation propagated as an unhandled `IntegrityError` all the way up to FastAPI's default handler —
-a bare 500, not a meaningful error. Separately confirmed while investigating: `catalog-service`'s own
-test suite (`tests/test_datasets_api.py`, which also covers `functions` and `pipelines`/`models`
-despite the filename) had zero coverage of deleting a function at all, published or not — this path
-had never actually been exercised before.
-
-**Fix:** `FunctionVersion.function_id`'s FK now carries `ondelete="CASCADE"` (a version only means
-anything in the context of the function that owns it — unlike `LineageEdge`'s already-documented
-dangling source_id/target_id, there's no reason to keep orphaned version rows once their function is
-gone). `migrations/versions/0002_function_versions_cascade.py` applies the matching change to the
-live constraint (looked up by name dynamically via `information_schema` rather than hardcoded, since
-Postgres's default FK-naming convention was never actually confirmed against the live database
-before this migration ran). `tests/test_datasets_api.py` gained
-`test_deleting_a_published_function_cascades_its_versions`, closing the coverage gap this bug hid
-in. **Confirmed fixed** — 16/16 `catalog-service` tests pass against a real (throwaway) Postgres,
-migration applies and downgrades cleanly, and the new regression test exercises exactly the path
-that 500'd.
-
-One more thing found live, worth remembering for any future hand-written Alembic migration in this
-repo: the first version of `0002_function_versions_cascade.py`'s revision id was
-`0002_function_versions_cascade_delete` (38 characters) — Alembic's default `alembic_version.
-version_num` column is `VARCHAR(32)`, so that id failed migration-time with a
-`StringDataRightTruncation` `DataError`, not at authoring time. Keep future revision ids under 32
-characters; `0001_initial_schema`'s 19-character id happened to never test this boundary.
-
-**Confirmed live, 2026-09-03**, after working through the deployment gotcha in the entry directly
-below this one: `platform function delete` on a freshly published function succeeded, and a second
-`platform function list` confirmed it (and the two leftover test functions from the earlier 500s)
-were actually gone.
-
-### A merged fix to `catalog-service`'s Python source doesn't deploy itself — Argo CD only diffs the tracked manifest
-
-**Update, 2026-09-03, `platform-module-lifecycle` branch:** the lesson below turned out to be
-narrower than it needed to be. It was written assuming the failure mode was specific to
-`PreSync`/`PostSync` hooks (which really do have that extra "only created during a sync operation"
-wrinkle) — but live-verifying this branch's `modules-root`/`hello-module` install-uninstall-reinstall
-cycle hit the *same symptom* three separate times against **plain, non-hook resources**: a brand
-new `Application` (`modules-root.yaml` itself, then `hello-module`'s generated Application) simply
-didn't exist in the cluster minutes after being pushed, and once `argocd.argoproj.io/refresh=hard`
-alone wasn't enough, the `.operation`-patch trick below was what actually made it appear. Same for
-pruning `hello-module` back out on uninstall. **Generalized lesson: don't assume "pushed to git"
-means "Argo has acted on it" for *any* change, hook or not** — this cluster's automated-sync poll
-interval has repeatedly lagged noticeably in live testing, and `refresh=hard` only recomputes the
-diff, it doesn't reliably force the controller to execute a sync operation on what it finds. Check
-for the real effect (a resource that should now exist or be gone, not just a `status.sync.revision`
-match) before concluding something didn't work, and reach for the `.operation` patch as the default
-"make Argo actually do the thing now" tool, not a hook-specific special case.
-
-Added 2026-09-03, `platform-function-promote` branch, discovered while trying to verify the fix
-above live. Merging this branch's `catalog-service` changes (the model fix, the new Alembic
-migration) into `dev` and confirming `git log` on `homelab-dev` matched `origin/dev` was **not**
-enough to make `platform function delete` actually work — it kept 500ing even after the merge.
-
-Root cause: `apps/core/catalog-service.yaml`'s `Application` only tracks
-`manifests/catalog-service.yaml` — the Job/Deployment/Service *shape*. This branch never touched
-that file (no reason to; nothing about the Kubernetes objects themselves changed), so Argo CD saw
-zero diff and never scheduled a real sync operation. The `catalog-service-migrate` Job is a
-`PreSync` hook, and hooks only execute *during* a sync operation — with nothing to sync, the Job
-that had run hours earlier (before this branch existed) just sat there, `Complete`, stale, having
-never seen the new code or the new migration at all.
-
-Two more things learned working through it, in order tried:
-
-1. **`kubectl annotate application ... argocd.argoproj.io/refresh=hard`** only forces Argo to
-   re-diff against git — it does not force a sync operation when the diff comes back empty. Confirmed
-   the `Application`'s `status.sync.revision` matched the merge commit even before any of this, which
-   is exactly why this looked deceptively "already synced."
-2. **Deleting the stale Job and waiting for `syncPolicy.automated.selfHeal` to recreate it does NOT
-   work** — `selfHeal` reconciles normal managed resources, but hook resources (`PreSync`/`PostSync`)
-   are only created during a sync operation's hook phase, not continuously reconciled the way a
-   Deployment or Service is. A deleted hook just stays deleted until the next real sync.
-
-**What actually worked**, with no `argocd` CLI installed on `homelab-dev`: writing directly to the
-`Application`'s `.operation` field, which is exactly what `argocd app sync` does under the hood —
-
-```bash
-sudo /usr/local/bin/kubectl -n argocd patch application catalog-service --type merge \
-  -p '{"operation":{"sync":{"revision":"HEAD","prune":true}}}'
-```
-
-This forced a real sync regardless of the (empty) manifest diff, which re-ran the `PreSync` hook,
-which pulled the current `:dev` image (already rebuilt by CI off the merge commit — confirmed by the
-migration log finally showing `Running upgrade 0001_initial_schema -> 0002_function_versions_cascade`
-instead of just Alembic's context-setup lines) and applied the migration for real.
-
-**General lesson, worth remembering for any future branch that changes a service's Python source
-(models, routers, migrations) without also touching its `argocd/manifests/*.yaml`:** a merge to
-`dev` alone does not guarantee the new code is actually running in the cluster. If the K8s manifest
-didn't change, nothing will prompt Argo to re-sync on its own — check whether a real sync actually
-happened (a fresh `PreSync` Job `AGE`, not just a matching `status.sync.revision`) before trusting
-that a live verification is testing the new code at all, and use the `.operation` patch above to
-force one when it didn't.
-
-### `platform module uninstall --purge-data` run too early recreates the PVC it's trying to delete
-
-Added 2026-09-03, `platform-module-lifecycle` branch, found live verifying `hello-module`'s
-install/uninstall/reinstall/purge-data cycle end to end. Sequence that broke: run `platform module
-uninstall hello-module --purge-data`, then immediately run the `kubectl delete pvc ...` command it
-prints. The PVC came right back — `kubectl get pvc` showed it existing again seconds later with a
-fresh `AGE`.
-
-Root cause: at the moment the PVC was deleted, `hello-module`'s own `Application` object hadn't
-actually been pruned yet — Argo's automated sync after the `uninstall` push hadn't run yet (the
-same repoll-lag pattern the entry above generalizes). While that `Application`'s Helm release is
-still live, its own `syncPolicy.automated.selfHeal` reconciles every resource its chart declares,
-PVC included — deleting a resource that release still owns just gets it recreated on the spot, the
-exact same mechanism that makes a plain `uninstall` (no flag) leave the PVC alone on purpose
-(`argocd.argoproj.io/sync-options: Delete=false`) — except here it's the *wrong* resource being
-protected, because the Application managing it hasn't actually gone away yet.
-
-**Fix, shipped in this same branch:** `platform_cli/module.py`'s `_print_purge_command` no longer
-just prints the delete command — it now prints an explicit "do NOT run this yet" warning plus the
-exact `kubectl -n argocd get application <name>` check to confirm the Application is really gone
-(and how to force it via the `.operation` patch above if it isn't) before the delete command. This
-doesn't make the underlying Argo lag go away, but it stops the CLI's own guidance from implying
-"the uninstall above has synced" is something you can just take on faith, which is exactly what led
-to this the first time.
-
-**If you hit this anyway** (recreated PVC after a purge-data delete): re-confirm the Application is
-gone (`kubectl -n argocd get application <name>` → `NotFound`), then re-run the delete. Nothing
-about this is unrecoverable — the PVC just needs deleting again once its owning Application
-actually isn't there to recreate it.
+**Status:** application-layer gap closed by this branch. **Do not** put `catalog-service` behind an
+`Ingress`, a `LoadBalancer` Service, or anything else reachable off-cluster until the NetworkPolicy
+above exists too — today "anyone who can reach it" is still "any pod on this cluster," not yet
+narrowed to "anyone who went through gateway."
 
 ### `platform-cli-login`'s device-grant fields — one Keycloak-version detail confirmed only at bootstrap-script-run time
 
@@ -795,17 +627,6 @@ by raw IP" entry's closing note). Consistent with this repo's existing homelab/t
 model (MetalLB's pool, no firewall by default) — flagged here rather than assumed acceptable without
 saying so.
 
-**Superseded, 2026-09-02 (platform-ingress branch).** The `bind_address`/local-port fix above was
-always framed as bridging the gap until a real Ingress existed — that Ingress now exists, and
-`KeycloakLoginFlow` no longer runs a `kubectl port-forward` at all (see
-`_keycloak_connection.py`'s module docstring for the replacement: a direct CA-pinned `httpx.Client`
-against `https://keycloak.platform.local`). The device-flow verification URL it prints now comes
-straight from Keycloak's own Ingress-facing hostname, openable from any machine with the hosts-file
-entry — no ephemeral port, no bind-address tradeoff to reason about. The `_PortForward` class this
-entry's fix and tests were about no longer exists; its regression tests were replaced with direct
-coverage of `extract_platform_ca_cert()`, the one piece of the old mechanism that's still in use
-(see `tests/test_keycloak_connection.py`).
-
 ### `platform login`'s tokens failed gateway's issuer check — same port-reflection behavior, a third symptom
 
 Found 2026-09-02, platform-gateway-auth branch, same live end-to-end pass — the third distinct
@@ -857,21 +678,6 @@ as harmless-looking leftovers, when that Ingress work lands.
 `keycloak-instance`/`gateway`, a fresh `platform login` succeeded with no "Invalid issuer" error. The
 very next call (`platform me`) immediately hit a different, previously-hidden failure — see the next
 entry.
-
-**Superseded, 2026-09-02 (platform-ingress branch), exactly as this entry predicted.** The
-`hostname-port: "18444"` pin is gone from `keycloak-instance.yaml`, replaced with
-`additionalOptions: [{name: proxy-headers, value: xforwarded}]` — Keycloak's documented reverse-proxy
-option that trusts ingress-nginx's `X-Forwarded-*` headers instead of the raw backend connection, so
-generated URLs (including every issued token's `iss`) correctly read `https://keycloak.platform.local`
-with no port. `GATEWAY_KEYCLOAK_PUBLIC_URL` dropped its `:18444` suffix to match, exactly as this
-entry said it should.
-
-**Confirmed live, 2026-09-02.** `proxy-headers: xforwarded` alone was enough — no fallback to a
-pinned `hostname-port: "443"` was needed. A fresh `platform login` through the real Ingress produced
-a token whose `iss` claim decodes to exactly `https://keycloak.platform.local/realms/platform`, no
-port. This entry, the "Reaching Keycloak by raw IP" entry, and the verification-URL entry above are
-now all fully closed — every workaround they each separately introduced is gone, replaced by the
-real Ingress doing the job all three were standing in for.
 
 ### `platform me`'s first real call hit a fourth issue: PyJWT rejected a real token's `aud` claim
 
@@ -931,63 +737,6 @@ first three all being downstream of `hostname-port` behavior no unit test could 
 real cluster. Worth remembering next time a new claim or Keycloak-specific behavior is added anywhere
 in this codebase: match what real Keycloak actually produces in test fixtures, not just what's
 convenient to construct, or the gap just moves to the next thing that touches it.
-
-### `PlatformClient` never trusted `platform-ca` — broke the moment `gateway_url` started pointing at real TLS
-
-Found 2026-09-02, platform-ingress branch, first live `platform me` after the new Ingress landed —
-two distinct bugs in the same fix, found back to back.
-
-**Bug one:** `platform_sdk/config.py`'s `gateway_url` default changed from `http://localhost:8080` (a
-plain-HTTP port-forward — no TLS involved at all) to the real `https://gateway.platform.local`
-Ingress. `PlatformClient` had never needed to verify a TLS certificate before, so its `httpx.Client`
-never pinned one — every request failed with `ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] ...
-unable to get local issuer certificate`, because gateway's Ingress cert is signed by this cluster's
-self-signed `platform-ca`, which isn't in any system trust store. `KeycloakAdminClient`/
-`KeycloakLoginFlow` had already solved exactly this problem for their own Keycloak connections
-(`extract_platform_ca_cert()` in `_keycloak_connection.py`, reading `platform-ca-secret` via
-`kubectl`) — `PlatformClient` just hadn't needed the same treatment until `gateway_url` itself became
-a real HTTPS endpoint.
-
-**Status:** fixed by giving `PlatformClient` the same CA-pinning, gated on `gateway_url` actually
-being `https://` (so the test suite's mocked `http://gateway.test` base_url — and anyone who
-deliberately points `gateway_url` back at a plain-HTTP port-forward — never touches `kubectl` at
-all).
-
-**Bug two, found immediately after deploying the first fix:** pinning the CA *eagerly*, in
-`PlatformClient.__init__`, broke `platform login` itself — `platform_cli/main.py`'s Typer callback
-constructs a `PlatformClient` unconditionally for **every** command, including `login` and `workspace
-invite`, which build their own separate `KeycloakLoginFlow`/`KeycloakAdminClient` and never send this
-one a request at all. An eager `extract_platform_ca_cert()` call in `__init__` meant `platform login`
-now failed if `kubectl` wasn't reachable at that moment — exactly backwards, since logging in is the
-one thing that shouldn't need to already be talking to gateway.
-
-**Status:** fixed by making CA extraction (and the underlying `httpx.Client` itself) lazy — built by
-a new `_ensure_http()` on the first *actual* request, the same "checked once, on first use" shape
-`_ensure_token()` already had for token refresh, not in the constructor. A command that never sends
-PlatformClient a request now never touches `kubectl` through this path either.
-
-**Confirmed live** — `platform me` and `platform workspace list` both succeeded against
-`https://gateway.platform.local` with no certificate error, and `platform login` (which never sends
-PlatformClient a request at all) confirmed unaffected by either the fix or the bug it was fixing.
-Covered by three new `test_client.py` cases: HTTPS pins the CA on first use (not construction),
-construction alone never touches `kubectl` regardless of scheme, and HTTP never touches it even on
-first use.
-
-**General lesson, same shape as this session's other four:** a working default (`http://localhost:8080`,
-no TLS) quietly hid a requirement (CA trust) that only became real once the default changed to
-something with actual TLS — nothing about `PlatformClient`'s own code was wrong until the ground it
-stood on moved. Worth remembering whenever a URL-shaped default changes scheme, not just host: check
-what trust assumptions that default was implicitly satisfying before.
-
-**The platform-ingress plan's full live verification is now complete**, this bug included — every
-item in the plan's Verification section is checked off against the real cluster: both `Application`s
-Synced/Healthy after the manifest edits, ingress-nginx's LoadBalancer IP confirmed exactly
-`192.168.4.240` as predicted, `https://keycloak.platform.local` surviving past the login page with
-zero `kubectl port-forward` processes running, a freshly issued token's port-free `iss`, `platform
-login` → `platform me` → `platform workspace list` all working end to end against the real Ingress
-hostnames, and both bootstrap scripts rerunning cleanly with their port-forward blocks gone. The one
-thing not in the original plan — `PlatformClient`'s own CA trust — surfaced live exactly the way this
-file's other entries did, and is fixed and tested the same way.
 
 ### GHCR packages default to private on first publish — one manual step after `ci.yml`'s first push
 
@@ -1088,132 +837,62 @@ e.g. `./script.sh` rather than `bash script.sh`) needs this same one-time `git u
 side of the file-delivery pipeline (writing file bytes to your working copy has no executable bit to
 set), so it has to happen wherever the actual `git commit`/`push` happens.
 
-### `modules-root` silently stops syncing once the last module is uninstalled
+### `modules-root` doesn't reliably auto-prune a module's `Application` object on uninstall
 
-Added 2026-09-08, `fix/modules-root-allow-empty-sync` branch. Found live, not hypothetically: two
-test modules from an earlier branch (`needs-hello`, `needs-ghost`, platform-module-deps'
-verification round trip — see that branch's own cleanup notes) had their `modules-enabled/*.yaml`
-files removed and their source directories deleted days earlier, yet `kubectl -n needs-ghost get
-all`/`kubectl -n needs-hello get all` still showed real Deployments, Services, ReplicaSets, and Pods
-running — orphaned for 4+ days, not cleaned up the way `platform module uninstall` (and
-`modules-root`'s `prune: true`) is supposed to guarantee.
+Found 2026-09-10, `feature/gateway-module-lifecycle-dispatch` branch, during the first-ever live
+end-to-end exercise of `platform module uninstall` — both the underlying CLI code path itself, and,
+for the first time, gateway's new `POST /modules/{id}/uninstall` dispatch mechanism triggering it via
+the new `module-lifecycle.yml` workflow. Not caused by anything this branch built: the dispatch
+mechanism's job ends at "delete `modules-enabled/<id>.yaml` and push" — confirmed working perfectly
+(the commit landed, with the correct SSH `repoURL`, from a real non-detached branch). What's actually
+broken is one layer downstream, in `apps/core/modules-root.yaml`'s own app-of-apps prune, which
+predates this branch (platform-module-lifecycle, 2026-09-03) and has apparently never been exercised
+live before now.
 
-**Root cause:** `modules-root.yaml`'s `Application` sources `src/modules-enabled/` as a plain
-`directory:` source. Once the last module's file was removed from that directory, its target state
-resolved to *zero* child Applications — and Argo CD has a built-in safety guard that refuses to
-auto-sync when a directory source's desired state is completely empty, specifically to protect
-against an accidental repo/path mistake silently deleting everything a directory-sourced app
-manages. `kubectl -n argocd get application modules-root -o jsonpath='{.status.conditions}'` showed
-it plainly once looked for: `"Skipping sync attempt to [...]: auto-sync will wipe out all
-resources"`. But "no modules currently installed" is a completely ordinary, expected state for this
-repo (a fresh clone starts here) — not a mistake to guard against — so this guard doesn't just skip
-one sync attempt, it permanently freezes `modules-root` from that point on, which also means it
-stops pruning anything else in `modules-enabled/` until *something* forces a real sync again. The
-two orphaned child `Application`s (`needs-ghost`, `needs-hello`) each separately showed a
-`ComparisonError` (`app path does not exist`, since their own source pointed at the now-deleted
-`src/charts/needs-*` directories) — a downstream symptom of the real problem, not the cause; the
-same "check `.status.conditions` on the parent, not just the symptomatic child" lesson as the
-`__REPO_URL__`/`__REVISION__` entry above.
-
-**Fix:** `modules-root.yaml`'s `syncPolicy.syncOptions` now includes `AllowEmpty=true`, the standard
-Argo CD flag for exactly this case — an intentionally-empty directory source is a legitimate desired
-state, not something to guard against. One line, no other change needed.
-
-**Immediate live remediation** (separate from the code fix, needed regardless since the guard had
-already been silently active for days): the two orphaned `Application` objects still carried their
-cascade-delete finalizer (`resources-finalizer.argocd.argoproj.io`, from
-`platform_cli/manifest.py`'s generated manifest — see that file's own comment), so deleting them took
-their Deployment/Service/ReplicaSet/Pod along automatically:
-
-```bash
-sudo kubectl -n argocd delete application needs-ghost needs-hello
-```
-
-`CreateNamespace=true` never cleans up the namespace it created on Application delete — that needed
-a separate manual step:
-
-```bash
-sudo kubectl delete namespace needs-ghost needs-hello
-```
-
-**Confirmed fixed, 2026-09-08:** after the two deletes above, `modules-root` flipped back to
-`Synced`/`Healthy` on its own (its target state — still empty — no longer disagreed with live
-state, so there was nothing left to skip). `kubectl -n argocd get applications` and `kubectl get ns
-| grep needs` both came back clean. The `AllowEmpty=true` fix itself prevents this from recurring
-the next time every module gets uninstalled — untested against a *second* real empty-to-nonempty
-cycle on this cluster (nothing to uninstall from at the time this was fixed), but this is Argo CD's
-own documented mechanism for exactly this guard, not a workaround this repo invented.
-
-**Follow-up, same day (2026-09-08) — the untested case above got tested, and `AllowEmpty=true` alone
-turned out not to be enough.** Verifying `feature/gateway-module-registry` live meant installing then
-immediately uninstalling `hello-module` — a real single-module-to-empty transition, the exact case
-left untested above. `modules-root` hit the *identical* `SyncError` again
-(`"Skipping sync attempt to [<uninstall commit sha>]: auto-sync will wipe out all resources"`) even
-though `kubectl -n argocd get application modules-root -o jsonpath='{.spec.syncPolicy.syncOptions}'`
-confirmed `AllowEmpty=true` was genuinely present in the live spec — this was not a case of the fix
-having failed to deploy.
-
-**What this means:** `AllowEmpty=true` prevents the *permanently stuck* failure mode this entry was
-originally written for (the guard no longer freezes `modules-root` forever, and a later, unrelated
-push can still trigger a fresh comparison) — but it does not appear to make Argo CD's **automated
-self-heal** sync path perform the actual non-empty→empty prune on its own. One explicit, manually-
-triggered sync was what actually got it unstuck this time, the exact same `.operation`-patch
-mechanism the "`platform module uninstall --purge-data`" and "A merged fix ... doesn't deploy
-itself" entries above already document as the general "make Argo actually do the thing now" tool for
-a stalled automated sync:
-
-```bash
-sudo kubectl -n argocd patch application modules-root --type merge \
-  -p '{"operation":{"initiatedBy":{"username":"<your-username>"},"sync":{"prune":true}}}'
-```
-
-**Confirmed live, 2026-09-08:** this single manual sync immediately flipped `modules-root` to
-`Synced`/`Healthy` and pruned `hello-module`'s `Application` (and its Deployment/Service/Pod
-underneath, via that Application's own cascade-delete finalizer) cleanly —
-`kubectl -n argocd get applications -l platform.io/tier=module` came back empty right after.
-
-**Status:** `AllowEmpty=true` stays correct and necessary (without it, this state is permanently
-stuck rather than one manual sync away from resolved) — this isn't a reason to revert or replace it.
-Treat "uninstalled the last remaining module" as needing one manual `.operation`-patch sync every
-time it happens, not something that resolves itself on `modules-root`'s own automated schedule.
-Worth a real fix at the code level if this recurs often enough to be annoying (e.g. `bootstrap/`
-tooling or `platform module uninstall` itself detecting "this was the last module" and triggering the
-sync automatically) — not done here, since this branch's actual scope was the gateway module
-registry, not `modules-root`'s sync behavior a second time.
-
-### `keycloak-bootstrap-ui-shell-client.sh`'s `post.logout.redirect.uris` — multi-valued client attributes need `##`, not a space
-
-Added 2026-09-08, feature/ui-shell-oauth branch. Same "flag a genuinely uncertain Keycloak-version
-detail rather than silently assume it" discipline as the `platform-cli-login` device-grant-field
-entry above — this one turned out to need a real fix, not just a confirmation.
-
-`post.logout.redirect.uris` is a standard OIDC RP-initiated-logout client attribute, and this
-script registers two values for it (the deployed origin's `/*` and `localhost:5173`'s `/*`, mirroring
-the two registered `redirectUris`). The first draft joined them with a plain space:
-`"${DEPLOYED_ORIGIN}/* ${LOCAL_DEV_ORIGIN}/*"`.
-
-Keycloak's `ClientRepresentation.attributes` is a flat map of one string per key — there's no native
-array shape for an attribute value. For the handful of attributes (like this one) that are genuinely
-multi-valued, Keycloak's own client code joins/splits them internally on a literal `##` separator, not
-a space or comma. A space-joined value isn't split into two URIs at all — it's parsed as *one* URI
-containing a literal space character, which fails URI validation outright.
-
-**Confirmed live, first real run against `homelab-dev`'s 26.7.2 Operator, 2026-09-08:** client
-creation 400'd immediately —
+**What happened:** after `hello-module.yaml` was deleted from `modules-enabled/` and pushed,
+`modules-root`'s Application correctly recalculated `hello-module` as `OutOfSync` (needing pruning) —
+confirmed even after an explicit hard refresh (`kubectl annotate application modules-root
+argocd.argoproj.io/refresh=hard`) against the exact commit that deleted the file. But its automated
+sync (`syncPolicy.automated: {prune: true, selfHeal: true}`) never actually removed the child
+`Application`. Its own `status.operationState.syncResult.resources` showed the real reason — not an
+error, a deliberate skip:
 
 ```json
-{"error":"invalid_input","error_description":"A post-logout redirect URI is not a valid URI"}
+{"group": "argoproj.io", "kind": "Application", "name": "hello-module", "status": "PruneSkipped", "message": "ignored (requires pruning)"}
 ```
 
-**Fix:** join with `"##"` instead of `" "` —
-`"post.logout.redirect.uris": ($deployedLogout + "##" + $localLogout)`. Re-run confirmed clean:
-client created, both post-logout redirect URIs present and individually valid.
+Ruled out before giving up on a root cause: `argocd-cm`'s `resource.exclusions` (only excludes
+`Endpoints`/`EndpointSlice`/`Lease`/authn-authz noise, nothing touching `argoproj.io`), and the
+`default` `AppProject`'s `namespaceResourceBlacklist`/`clusterResourceWhitelist` (no restriction on
+`Application` either). Searched Argo CD's own docs and several GitHub issues without finding the exact
+internal condition that produces `PruneSkipped`/`"ignored (requires pruning)"` specifically for a
+nested `Application` resource — this looks like a known-flaky corner of Argo CD's app-of-apps pruning
+(several unrelated community reports describe the same "correctly diffs it, then skips the actual
+delete" shape), not something specific to this repo's config, but that's not a confirmed root cause,
+just the best read available without digging into Argo CD's own source.
 
-**Status:** fixed in the script itself (not a workaround to remember) — this entry exists so a future
-reader who sees a similar "not a valid URI" error on some *other* multi-valued Keycloak client
-attribute (e.g. `request.uris`, `web.origins` when set via the attributes map instead of the
-top-level field) recognizes the `##`-separator pattern immediately instead of re-diagnosing it from
-scratch.
+**Workaround, confirmed working:** a direct delete goes through the exact same
+`resources-finalizer.argocd.argoproj.io` cascade Argo CD's own prune would have used —
+
+```bash
+sudo kubectl -n argocd delete application <module-id>
+```
+
+— correctly removed `hello-module`'s `Deployment`/`Service`. Its `PersistentVolumeClaim` intentionally
+survives this (and would survive a working auto-prune too) — see `src/charts/hello-module/templates/
+pvc.yaml`'s own `Delete=false` convention, referenced in `modules-root.yaml`'s comment.
+
+**Status:** open, real follow-up work, not a "someday" caveat — every `platform module uninstall`
+hits this identically whether it's run directly by an operator or triggered through gateway's
+dispatch, so it isn't specific to either door. Doesn't block this branch (the dispatch mechanism's own
+job is fully proven). Matters more once a future branch wires the Add-ons page's Remove button to this
+endpoint — a user clicking Remove and seeing the module still listed/running afterward, with no
+visible reason, would be a real point of confusion without this fixed or at least surfaced some other
+way in the UI. Next step when picked back up: reproduce with a plain local `platform module uninstall`
+(no gateway involved at all) to rule out anything about the workflow's own git identity/environment
+being a contributing factor, then actually read Argo CD's sync-task-generation code (or file an
+upstream issue if it turns out to be a genuine Argo CD bug) rather than continuing to guess from
+documentation alone.
 
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
