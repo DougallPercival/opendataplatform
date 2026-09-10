@@ -160,6 +160,73 @@ Once the sealed value is pushed and the controller has decrypted it into a real 
 (`kubectl -n gateway rollout restart deployment/gateway`) to pick it up — a missing/unconfigured token
 degrades to a `503` on both endpoints (`GitHubDispatchError`), never a crash.
 
+## Reverse-proxying into a module's own UI (2026-09-10, feature/module-proxy branch)
+
+`docs/architecture/ui-shell-plan.md` item 8 — the last item on that doc's build list, and closed out
+by this branch. New `app/module_proxy.py`, deliberately its own module rather than folded into
+`app/modules.py` (registry/lifecycle concerns) or `app/proxy.py` (one fixed, startup-known backend;
+this resolves a different backend per request). Two routes, both nested under one reserved `proxy`
+path segment so a module's own arbitrary UI paths can never collide with a gateway-reserved one — a
+bare `/modules/{id}/{path:path}` catch-all would risk exactly that:
+
+- `GET /modules/{module_id}/proxy-token` — mints a short-lived, module-scoped proxy token.
+- `{GET,POST,PUT,PATCH,DELETE} /modules/{module_id}/proxy[/{path}]` — the actual reverse proxy,
+  authorized by that token.
+
+**Why a token in a query param, not the usual `Authorization` header:** `ui-shell` renders a
+module's UI as an embedded `<iframe src="...">` (a deliberate choice over a new-tab link, matching
+ARCHITECTURE.md's "deep-links into each module's own UI" framing) — a plain browser navigation like
+that structurally cannot send a custom header, and this system has never used cookies for identity
+(see `main.py`'s CORS comment). So `ui-shell` fetches a token from the mint endpoint with a normal
+authenticated `fetch()` first, then builds the iframe's `src` with that token as `?token=`; the proxy
+route accepts *that* instead, and only for this one narrow purpose.
+
+The token itself is a stateless, 5-minute **HS256** JWT (`module_id`/`workspace`/`user`/`role`/
+`purpose: "module-proxy"` claims, taken directly from the mint request's own verified auth, never
+re-derived) — HS256 rather than a second RS256 keypair or a server-side token store, since nothing
+else ever verifies this token type and gateway has no persistence layer that would survive a pod
+restart. `purpose: "module-proxy"` is defense in depth: `verify_token()` already hardcodes
+`algorithms=["RS256"]`, so an HS256 token is structurally rejected everywhere else in gateway without
+this check — `purpose` is a second, explicit layer on the one place that *does* accept HS256. New
+`GATEWAY_MODULE_PROXY_TOKEN_SECRET` setting, sealed the same way `gateway-github-token` was via new
+`bootstrap/seal-gateway-module-proxy-secret.sh` — this one **generates** the secret itself
+(`openssl rand -hex 32`) rather than prompting, since it's an internal signing secret with no external
+credential to go create first.
+
+The proxy route resolves the module's backend URL (`platform_cli/manifest.py`'s `proxyTo`, now
+propagated onto the Application as the `platform.io/proxy-to` annotation, same pattern
+`displayName`/`icon`/`navPath` already established) fresh on **every** request via `app/argocd.py`'s
+`get_module_proxy_target()` — never cached or baked into the token, so an uninstall mid-session 404s
+the very next request instead of continuing to forward into a namespace being torn down. Forwarding
+mirrors `proxy.py`'s hop-by-hop header stripping and streaming pattern, with two differences:
+`X-Workspace`/`X-User`/`X-Role` sent to the module come from the **token's** claims (any
+caller-supplied versions are stripped first, since there's no fresh `verify_token()` call here to
+derive them from), and `X-Frame-Options`/CSP `frame-ancestors` are stripped from the module's
+response so gateway's own origin framing it doesn't get silently blocked.
+
+`GET /modules`'s new `has_own_ui` field (`ModuleSummary.has_own_ui`, `app/argocd.py`) is a boolean,
+not the raw proxy URL — `ui-shell` only ever needs to know whether to attempt minting a token; the
+module's cluster-internal Service DNS name stays server-side-only. Since `proxyTo` is a *required*
+`module.yaml` field, `has_own_ui` only ever reads `false` for the same transient "installed before
+this branch, not yet reinstalled" state items 4/6 already established for the other annotations.
+
+**Known, deliberately out-of-scope limitation:** the `?token=` query param doesn't propagate to a
+module's own follow-up requests — a relative `<script src>`/`fetch()` the module's page issues
+resolves against the current document URL and drops the query string entirely. This is only provably
+correct end-to-end against `hello-module`, whose content (stock `nginx:stable`'s default page) is
+self-contained and issues no follow-up requests. A module with real frontend assets or backend calls
+of its own would need a further fix (HTML rewriting to inject the token into relative URLs, or a
+narrowly path-scoped cookie carved out as a deliberate exception) — see `docs/known-issues.md`.
+
+**Confirmed live, 2026-09-10**, against `homelab-dev`: `curl` against the mint endpoint with a real
+editor-role token returned a JWT whose decoded claims matched exactly; `curl` against the proxy route
+streamed back the real stock nginx page with a `200` and no `X-Frame-Options` header. In the browser,
+after merge, `hello-module`'s detail page initially still showed the stale "isn't built yet" notice —
+the same mutable-`:dev`-tag stale-pod gotcha (`docs/known-issues.md`) hit a second time in as many
+branches — a `rollout restart` plus hard-refresh fixed it and the iframe rendered the real page
+inline. Full writeup, including a real boundary-detection bug found and fixed in the sealed-secrets
+bootstrap tooling along the way: `docs/architecture/ui-shell-plan.md`'s item 8 entry.
+
 ## Force cleanup — closing the modules-root prune gap (2026-09-10, feature/force-cleanup branch)
 
 `docs/known-issues.md` documents a recurring, not-fully-root-caused Argo CD quirk: after an
@@ -194,15 +261,22 @@ that's still mid-flight to git. Waiting for a deliberate click is what avoids th
 
 ## What's NOT built yet — the rest of ARCHITECTURE.md's gateway scope
 
-Dependency-checking, CORS, the installed-modules registry, the Add-ons page's static catalog, and the
-install/uninstall dispatch mechanism are real now (above), and `ui-shell` itself now calls
-`GET /modules` for its real nav (`docs/architecture/ui-shell-plan.md` item 5, `feature/ui-shell-nav`
-branch, 2026-09-09 — see `src/core/ui-shell/README.md`). Still not built: the Add-ons *page* itself in
-`ui-shell` actually calling the two new endpoints above (its Install button is still disabled), and
-reverse-proxying into other modules' own UIs (ARCHITECTURE.md §3, item 8). This service still proxies
-to exactly one backend, `catalog-service`, at one fixed URL; reverse-proxying into a module's own UI
-(item 8) is future work once `proxyTo` is propagated the same way `displayName`/`icon`/`navPath` are
-here.
+**`docs/architecture/ui-shell-plan.md`'s entire dependency-ordered build list is done** as of
+`feature/module-proxy` (2026-09-10, item 8, the last item on that list) — dependency-checking, CORS,
+the installed-modules registry, the Add-ons page's static catalog and its real Install/Remove/Force
+cleanup actions, real nav, and reverse-proxying into a module's own UI are all built and live-verified
+(sections above; this paragraph corrected 2026-09-11 — it had gone stale, still describing the Add-ons
+page's buttons and item 8 as undone well after both shipped). See that plan doc's own closing note on
+item 8 for the full picture.
+
+What's still genuinely open, carried forward from that plan rather than newly found here: the
+module-proxy's query-string-token limitation for a module with real frontend assets or its own backend
+calls (see the "Reverse-proxying into a module's own UI" section above — provably correct today only
+against `hello-module`'s self-contained stock nginx page), and the recurring mutable-`:dev`-image-tag
+stale-pod gotcha (`docs/known-issues.md`) that means `Synced`/`Healthy` never proves a new build is
+actually running. Broader, longer-term gaps against ARCHITECTURE.md's full vision (HA/multi-replica,
+observability, workspace-level resource quotas) aren't scoped here — `ARCHITECTURE.md` and
+`docs/known-issues.md` are the right place to track those as they come up, not this doc.
 
 NetworkPolicy enforcement isolating catalog-service's namespace ingress to gateway's namespace only —
 **built and confirmed live, `catalog-service-netpol` branch, 2026-09-03** (this paragraph corrected
