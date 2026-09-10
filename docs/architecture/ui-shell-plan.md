@@ -219,6 +219,75 @@ section to point at.
    still rendering correctly (no regression from the new route/nav); loading `/addons` directly from
    the URL bar (not just client-side navigation) rendered correctly — the same `nginx.conf` SPA
    fallback regression check item 5 established, now passing for a second route.
+
+   **✅ Mutation mechanism built (backend only), 2026-09-10 (feature/gateway-module-lifecycle-dispatch
+   branch)** — the trust-boundary decision recorded above, actually built: `POST
+   /modules/{module_id}/install` and `.../uninstall` (`app/modules.py`) don't touch git themselves.
+   Each calls new `app/github_dispatch.py`'s `trigger_module_workflow()`, which asks the GitHub API to
+   start a `workflow_dispatch` run of new `.github/workflows/module-lifecycle.yml` — that workflow
+   (unmodified `platform module install`/`uninstall` underneath) does the real commit/push, using
+   GitHub Actions' own ephemeral, auto-scoped `GITHUB_TOKEN` (`contents: write`, scoped to that one
+   job only), exactly the pattern decided on. Both endpoints are fire-and-forget: a `202` means the
+   workflow was told to start, nothing here waits for or reports back on how it went.
+
+   New `app/auth.py` `require_role()` is this service's first check of `derived.role` for anything
+   beyond plain membership — both endpoints require at least **editor** (a scoping decision with the
+   repo owner, alongside "backend only" and the GitHub-dispatch mechanism itself). `install` reuses
+   `check-requirements`'s own comparison for a `409` on unsatisfied `requires`, and deliberately does
+   **not** block reinstalling an already-`Healthy` module (`manifest.py`'s own docstring already
+   documents that as safe). Gateway's credential is a fine-grained GitHub PAT scoped to **Actions:
+   read/write only** on this repo (never Contents — the actual push never uses it), stored as this
+   repo's first real **SealedSecret** (`argocd/manifests/gateway.yaml`; the controller has been
+   deployed since day one but never actually used until now) via new
+   `bootstrap/seal-gateway-github-token.sh`.
+
+   Two real git-plumbing wrinkles found during research, both fixed entirely in
+   `module-lifecycle.yml` with no change to `platform_cli/repo.py`'s core logic: (1)
+   `actions/checkout@v4` sets `origin` to the HTTPS form, not the SSH form every self-referencing
+   Application (and Argo CD's own configured credential) expects — fixed with a new optional
+   `--repo-url` override on `platform module install` (`platform_cli/module.py`), which the workflow
+   passes explicitly; every existing local/CLI call is unaffected since it still defaults to
+   `discover_repo_url()`. (2) `actions/checkout@v4` leaves a detached HEAD even with an explicit
+   `ref:` — fixed with `git checkout -B dev` right after checkout, so the unmodified `commit_and_push`
+   has a real upstream to push to. See `src/core/gateway/README.md`'s own "Install/uninstall dispatch"
+   and "GitHub PAT for the module-lifecycle dispatch" sections for the full writeup.
+
+   **Confirmed live, 2026-09-10**, against `homelab-dev` and the real GitHub repo, end to end:
+   `POST .../hello-module/install` with an editor-role token returned `202`; the "Module lifecycle"
+   workflow fired and succeeded (`33s`, single green step); the resulting commit
+   (`gateway-module-lifecycle-bot`) landed with `repoURL: git@github.com:DougallPercival/
+   opendataplatform.git` — the correct SSH form, proving wrinkle (1) is actually fixed, not just
+   reasoned about — and Argo CD reconciled `hello-module` straight to `Synced`/`Healthy`, never stuck
+   `Unknown`, proving wrinkle (2) is fixed too (a detached-HEAD push failure would have left the file
+   unchanged and Argo CD with nothing new to reconcile). `POST .../uninstall` also returned `202`, its
+   own workflow run succeeded, and the commit correctly deleted `modules-enabled/hello-module.yaml`
+   and pushed. A viewer-role token got `403` from both endpoints with the exact designed message,
+   without ever reaching GitHub; `nonexistent-module` got `404` from `install`. The `409`
+   unsatisfied-`requires` case was not exercised live (no second catalog module declaring
+   `hello-module` as a dependency exists to test against) — left to the passing test suite
+   (`test_modules.py`), same as any other case this branch didn't have real fixtures for.
+
+   Three real things found and fixed/worked around along the way, worth recording since they'll bite
+   again on a fresh setup otherwise: `bootstrap/seal-gateway-github-token.sh` originally called
+   `kubeseal --fetch-cert` under plain `sudo`, which has no k3s-specific kubeconfig fallback the way
+   `sudo kubectl` does — fixed by passing `KUBECONFIG=/etc/rancher/k3s/k3s.yaml` explicitly (override:
+   `KUBESEAL_KUBECONFIG`). `module-lifecycle.yml` (a `workflow_dispatch`-only workflow, no
+   `push`/`pull_request` trigger) never appeared in GitHub's Actions UI until it existed on the repo's
+   **default branch** — this repo's default was `main`, but every self-referencing Application and
+   this whole branch's own workflow only ever targets `dev`; fixed operationally by switching the
+   repo's default branch to `dev` itself, on the reasoning that `main` wasn't actually part of this
+   repo's real workflow anywhere else. And see `docs/known-issues.md`'s new entry,
+   "`modules-root` doesn't reliably auto-prune a module's `Application` object on uninstall" — a
+   real, pre-existing gap (predates this branch, in `apps/core/modules-root.yaml` from
+   platform-module-lifecycle) this was the first live exercise of `platform module uninstall` to
+   actually hit; worked around per-instance with a direct `kubectl delete application`, left open as
+   real follow-up work since it affects both doors into uninstall equally, not something this
+   branch's own scope covers fixing.
+
+   **Still explicitly out of scope, unchanged from the decision above:** wiring the Add-ons page's
+   Install/Remove buttons to actually call these two endpoints, and any UI feedback for the "queued"
+   state — a separate future branch, the same item-6→7(read-only)→7(mutation) split repeated once
+   more.
 8. **Reverse-proxying into a module's own UI** ("deep-links into each module's own UI," §2 — the
    only phrase touching this anywhere, undefined beyond that). Needs `proxyTo` actually propagated
    into the deployed `Application` (currently inert, see "What already exists" above) plus a new
@@ -242,10 +311,11 @@ picked up, the same way this doc itself is that scoping pass for item 7 as a who
 ## Open questions this doc deliberately doesn't resolve
 
 - **Same-origin proxying vs. CORS** (item 2) — which one gateway actually implements.
-- **Git push credentials for gateway** (item 7) — **decided 2026-09-09, not yet built**: gateway will
-  trigger a GitHub Actions `workflow_dispatch` rather than hold a direct git/PAT credential, per the
-  writeup under item 7 above. Today only `platform-cli`, running as the operator locally, ever commits
-  to this repo; that stays true until the mutation mechanism itself is a real branch.
+- **Git push credentials for gateway** (item 7) — **decided 2026-09-09, built and confirmed live
+  2026-09-10**: gateway triggers a GitHub Actions `workflow_dispatch` rather than holding a direct
+  git/PAT credential, per the writeup under item 7 above. `platform-cli` running as the operator
+  locally, and now gateway's dispatch (via the workflow's own ephemeral `GITHUB_TOKEN`), are the only
+  two things that ever commit to this repo — still never a credential gateway itself holds.
 - **Proxy vs. iframe vs. external link** for deep-links into a module's own UI (item 8).
 - **What `PlatformModule` registrations actually are** — ARCHITECTURE.md's one undefined mention
   (§3). Items 4-5 above sidestep needing an answer (they read Argo CD `Application` state directly,
