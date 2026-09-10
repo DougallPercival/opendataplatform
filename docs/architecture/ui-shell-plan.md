@@ -328,12 +328,83 @@ section to point at.
    the full reasoning, including the race condition with the workflow's own git push that rules out
    firing it immediately).
 8. **Reverse-proxying into a module's own UI** ("deep-links into each module's own UI," §2 — the
-   only phrase touching this anywhere, undefined beyond that). Needs `proxyTo` actually propagated
-   into the deployed `Application` (currently inert, see "What already exists" above) plus a new
-   gateway route (e.g. `/modules/{id}/{path:path}`, registered before `proxy_router`'s catch-all,
-   building a per-request client the way `proxy.py` builds its request today rather than gateway's
-   current single-permanent-client pattern). Proxy vs. iframe vs. plain external link is also
-   unresolved — ARCHITECTURE.md never says which.
+   only phrase touching this anywhere, undefined beyond that). Needed `proxyTo` actually propagated
+   into the deployed `Application` (previously inert, see "What already exists" above) plus a new
+   gateway route, and left proxy vs. iframe vs. plain external link unresolved — ARCHITECTURE.md
+   never said which.
+
+   **Scoped, 2026-09-10** (three decisions with the repo owner): (a) auth — gateway mints a
+   short-lived, module-scoped proxy token, accepted as a `?token=` query param on the new proxy
+   route, because a plain `<iframe src>` navigation structurally cannot send a custom
+   `Authorization` header, and this system has deliberately never used cookies for identity; (b)
+   presentation — an embedded iframe on the existing module detail page, not a new-tab link; (c)
+   scope — the full slice in one branch (schema propagation, gateway route, token minting, `ui-shell`
+   UI), proven end to end against `hello-module`.
+
+   **✅ Built, 2026-09-10 (feature/module-proxy branch)** — `platform_cli/manifest.py`'s
+   `render_application_manifest()` now writes `proxyTo` as the `platform.io/proxy-to` annotation, the
+   same pattern `displayName`/`icon`/`navPath` (item 4) already established. New
+   `app/module_proxy.py` (gateway): `GET /modules/{id}/proxy-token` mints a stateless, 5-minute
+   HS256 JWT (`module_id`, `workspace`, `user`, `role`, `purpose: "module-proxy"` claims, all taken
+   from that request's own verified auth, never re-derived) — HS256 rather than a second RS256
+   keypair or a server-side token store, since nothing else ever verifies this token type and
+   gateway has no persistence layer that would survive a pod restart. `{GET,POST,PUT,PATCH,DELETE}
+   /modules/{id}/proxy[/{path}]` then decodes that token from `?token=`, resolves the module's
+   backend URL fresh on every request (never cached, so an uninstall mid-session 404s the very next
+   request), and streams the request through — forwarding `X-Workspace`/`X-User`/`X-Role` from the
+   **token's** claims, with any caller-supplied versions of those headers stripped first, and
+   stripping `X-Frame-Options`/CSP `frame-ancestors` from the module's response so gateway's own
+   origin framing it doesn't get silently blocked. `ModuleSummary.has_own_ui` (`GET /modules`) is a
+   boolean, not the raw proxy URL, which stays server-side-only. `ui-shell`'s `ModuleDetail.tsx`
+   mints a token once per page view (`useModuleProxyToken.ts`) and renders
+   `<iframe src=".../proxy/?token=...">` when `hasOwnUi` is true; a module installed before this
+   branch shows a "reinstall to pick this up" notice instead. Full writeups: `src/core/gateway/
+   README.md`'s "Reverse-proxying into a module's own UI" section and `src/core/ui-shell/README.md`'s
+   matching entry.
+
+   **Known limitation, not fixed by this branch**: the `?token=` query param doesn't propagate to a
+   module's own follow-up requests — a relative `<script src>`/`fetch()` a module's page issues
+   resolves against the current document URL and drops the query string entirely. This branch is
+   only provably correct end-to-end against `hello-module`, whose content (stock `nginx:stable`'s
+   default page) is self-contained and issues no follow-up requests of its own. A module with real
+   frontend assets or backend calls of its own would need a further fix (HTML rewriting to inject the
+   token into relative URLs, or a narrowly path-scoped cookie carved out as a deliberate exception).
+
+   **Confirmed live, 2026-09-10**, against `homelab-dev` and the real GitHub repo, end to end: `curl`
+   against `GET /modules/hello-module/proxy-token` with a real editor-role token returned a JWT whose
+   decoded claims matched exactly (`module_id`, `workspace: "personal"`, `user`, `role: "editor"`,
+   `purpose: "module-proxy"`, `exp - iat = 300`); `curl` against `.../proxy/?token=...` streamed back
+   the real stock nginx page with a `200` and no `X-Frame-Options` header. Before `hello-module` was
+   reinstalled to pick up the new `proxy-to` annotation, the mint endpoint correctly `404`'d with the
+   documented "isn't installed, or doesn't have a proxied UI yet" message — a live confirmation of the
+   exact transient-annotation-gap behavior items 4/6 already established, not a bug. In the browser,
+   `hello-module`'s detail page initially still showed the *old* "isn't built yet" static notice even
+   after merge — the same `ui-shell` mutable-`:dev`-tag stale-pod gotcha item 7's own close-out
+   documented, hit for a second time; `sudo kubectl -n ui-shell rollout restart deployment/ui-shell`
+   plus a hard-refresh fixed it, and the iframe then rendered the real nginx page inline. This is now
+   the second time in two consecutive branches this exact gotcha has bitten — worth treating "merged
+   and `Synced`" as never sufficient proof a `ui-shell`/gateway branch is actually live; always force
+   a rollout restart and check the image digest changed.
+
+   One real, unrelated bug found and fixed along the way: this branch's second `SealedSecret`
+   document in `argocd/manifests/gateway.yaml` (`gateway-module-proxy-secret`, alongside item 7's
+   `gateway-github-token`) broke `bootstrap/seal-gateway-github-token.sh`'s original boundary-detection
+   logic, which found "the last `SealedSecret` document in the file" positionally — a shortcut that
+   only ever worked while there was exactly one. Left as-is, a future GitHub PAT rotation would have
+   silently overwritten the *wrong* document. Fixed with a new shared `bootstrap/lib/common.sh`
+   function, `replace_sealed_secret_document()`, that finds each document by its own `metadata.name`
+   instead — used by both the existing script and this branch's new
+   `bootstrap/seal-gateway-module-proxy-secret.sh` (which generates the secret itself via
+   `openssl rand -hex 32` rather than prompting, since it's an internal signing secret with no
+   external credential to go create first). While fixing this, also found the original
+   boundary-detection regex never matched at all against this file's real on-disk (CRLF-terminated)
+   line endings — a second, latent bug independent of the two-document issue — so the fix is
+   CRLF-tolerant too. Verified by simulating a rotation of each secret independently against a copy
+   of the real `gateway.yaml` before ever running either script against the live cluster.
+
+   This closes out every item on this doc's build list — see `src/core/gateway/README.md`'s and
+   `src/core/ui-shell/README.md`'s own "What's NOT built yet" sections, both now pointing past
+   `ui-shell-plan.md` entirely to ARCHITECTURE.md's broader, longer-term gaps instead.
 
 ## Recommended first slice
 
@@ -355,7 +426,10 @@ picked up, the same way this doc itself is that scoping pass for item 7 as a who
   git/PAT credential, per the writeup under item 7 above. `platform-cli` running as the operator
   locally, and now gateway's dispatch (via the workflow's own ephemeral `GITHUB_TOKEN`), are the only
   two things that ever commit to this repo — still never a credential gateway itself holds.
-- **Proxy vs. iframe vs. external link** for deep-links into a module's own UI (item 8).
+- **Proxy vs. iframe vs. external link** for deep-links into a module's own UI (item 8) —
+  **decided and built 2026-09-10**: an embedded iframe, authenticated via a short-lived,
+  module-scoped proxy token gateway mints and accepts as a `?token=` query param (a plain
+  `<iframe src>` navigation can't send a custom header). See the writeup under item 8 above.
 - **What `PlatformModule` registrations actually are** — ARCHITECTURE.md's one undefined mention
   (§3). Items 4-5 above sidestep needing an answer (they read Argo CD `Application` state directly,
   the same move item 6 made for dependency-checking) — but if a future need reintroduces this

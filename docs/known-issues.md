@@ -919,6 +919,47 @@ reconciles while the manifest file is still present in git, it would just recrea
 gateway just deleted) — which is exactly why this needs to be a deliberate post-timeout action, not
 something wired into the mutation flow itself.
 
+### `ui-shell`'s mutable `:dev` image tag means "Synced/Healthy" doesn't prove the new build is actually running
+
+Found 2026-09-10, `feature/ui-shell-addons-mutation` branch, and hit again identically the very next
+branch (`feature/module-proxy`, same day) — worth its own entry rather than staying buried in two
+different items' write-ups in `docs/architecture/ui-shell-plan.md`, since it will keep recurring on
+every future `ui-shell` (and gateway) branch until something changes about the image-tagging strategy.
+
+**What happens:** `manifests/ui-shell.yaml`'s Deployment (like `gateway.yaml`'s and
+`catalog-service.yaml`'s) points at `ghcr.io/dougallpercival/ui-shell:dev` — a mutable tag, not a
+per-commit digest — with `imagePullPolicy: Always`. Argo CD's `Synced`/`Healthy` status only reflects
+whether the Deployment's *spec* (which always just says `:dev`, unchanged) matches what's in git, not
+whether the actually-running pod has pulled today's build. A pod that's been up for hours will happily
+sit there `Healthy`, serving yesterday's JavaScript bundle, even though the merge that was supposed to
+change its behavior landed cleanly and Argo CD shows everything green.
+
+**Symptom both times:** a page that should reflect a just-merged UI change (the Add-ons page's
+Install/Remove buttons the first time; `ModuleDetail.tsx`'s embedded iframe the second) kept showing
+the *old* behavior/copy after merge, with nothing in `kubectl`/Argo CD's own UI pointing at why —
+everything upstream (the build, the push, the sync) looked completely correct.
+
+**Fix, both times, the same:**
+
+```bash
+sudo kubectl -n ui-shell rollout restart deployment/ui-shell
+```
+
+— followed by a hard-refresh in the browser (`Ctrl+Shift+R`) to also bypass any cached JS bundle
+client-side, since the old page may still be sitting in the browser's own cache independent of which
+pod served it. A changed image digest after the restart (`kubectl -n ui-shell get pods -o
+jsonpath='{.items[0].status.containerStatuses[0].imageID}'`, or just diffing pod age before/after) is
+the real confirmation a new build is actually running — `Synced`/`Healthy` alone is not.
+
+**Status:** open, not fixed — this is a known trade-off of the `:dev`-tag/`imagePullPolicy: Always`
+convention every self-referencing app in this repo already uses (see `argocd/README.md`'s "Self-
+referencing apps" section), not a bug in any one branch. A real fix would mean per-commit image tags
+(or digest-pinning) plus Argo CD image-updater-style automation to bump the Deployment spec on every
+new build — a bigger, deliberate infrastructure change, not something to sneak in as a side effect of
+an unrelated feature branch. Until then: **after merging any `ui-shell` or gateway branch, always force
+a rollout restart and confirm the image digest changed — never trust `Synced`/`Healthy` alone as proof
+the new build is live.**
+
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
 - **`bootstrap/lib/common.sh` now prepends `/usr/local/bin` to `PATH`.** Some `sudo` configs (a
