@@ -312,6 +312,7 @@ spec:
 # decrypt correctly there. Run `bootstrap/seal-gateway-module-proxy-secret.sh` to produce the real
 # encryptedData.
 ---
+---
 apiVersion: bitnami.com/v1alpha1
 kind: SealedSecret
 metadata:
@@ -319,7 +320,7 @@ metadata:
   namespace: gateway
 spec:
   encryptedData:
-    secret: PLACEHOLDER-run-bootstrap/seal-gateway-module-proxy-secret.sh-against-your-real-cluster
+    secret: AgCkJBFtscq58cQVXcFfmi/jlOoFxAn+ICVivpeUR/sztr3QSSJ4cyrhR0y6bJ/IWujHPzHfXR6rF84zrCZydHa9fMDT6pSrxQ9sFVf0nrgdkTyBOtUCJrSLA6XG5nDNbwM4LElFeFmpOu2lWsAb82XqlvGaY0KALNGt3QTOUPnDUseyRr3Y9i+aY47k9o2MTxd+Ib83wCM0VwcMVeedDxINU+1A3y1MxpwMJoz0uQZThFJTm7z2tUApo0YCQm3NGKElT/Q7l0BraDifoWE9EnsS5zR/jASvQUYM42NlMSiJvt9dU2VKVs94azKvTkwu2iUIGXWwiNqKxRjfRXE0ue6f4DM6CTjx6fXis/1A/VEp31Sc1ZPCwdO5CsjHdJJPeLObNrQUNnUiZU2I/Yphg8nZEFhxN0B3+LvrK9R76bLx7UXTBxi2fF6R5HZXJS5TND3+hlBnIj1/lvaqUyFgwrmcdMxmvvhn0B0oU6KPHg5o49N7AfVaZl45EgAvJpRtjh/xS2f4sUY8HbXpVXajtKaalo3Q2qDZCyeAlB6WBQGaHrKzL25eyNrVXP8afksojP6AtR579G8Rm5WhY1Y+dX+D+zpEW/vs3U0gQv18zcFb6q/YaOx0nht+6ytwzfz55O817Wlhy/AE32Z1QTpKfP+sqH+Gq+SILQhnbtKl05e2Zhm+cdN5PcDfznRjDxE+hI5Q36ySOUdDOSYlIgoD9AVJLmtubH4QrfMPXhGxfYSkGLPzudaeVQeaIKHCc84+1XKH7DiakA71zAITJwZJ9vIp
   template:
     metadata:
       name: gateway-module-proxy-secret
