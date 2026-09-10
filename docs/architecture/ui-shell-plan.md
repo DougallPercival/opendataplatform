@@ -284,10 +284,49 @@ section to point at.
    real follow-up work since it affects both doors into uninstall equally, not something this
    branch's own scope covers fixing.
 
-   **Still explicitly out of scope, unchanged from the decision above:** wiring the Add-ons page's
-   Install/Remove buttons to actually call these two endpoints, and any UI feedback for the "queued"
-   state — a separate future branch, the same item-6→7(read-only)→7(mutation) split repeated once
-   more.
+   **Wiring the Add-ons page's Install/Remove buttons, `feature/ui-shell-addons-mutation`, built and
+   confirmed live 2026-09-10** — the last piece of item 7, closing the item-6→7(read-only)→7(mutation)
+   split. `ui-shell/src/addons/mutations.ts` calls the two endpoints above directly; a pure/React split
+   (`mutationState.ts` + `useAddonMutations.ts`, same pattern `workspace/workspaces.ts`/
+   `WorkspaceContext.tsx` already established) turns a `202`'s fire-and-forget "queued" into a short
+   poll against the already-fetched catalog (5s interval, 2-minute window) that resolves itself the
+   moment the module's real status flips, or falls back to a "still processing" note if it doesn't.
+   Role-gating mirrors gateway's `require_role(derived, "editor")` client-side (a UX nicety only,
+   re-checked server-side regardless); Remove goes through an inline confirm step noting removal can
+   take a few minutes, rather than blocking this branch on fixing the `modules-root` prune gap first —
+   this session's own scoping decision. See `ui-shell/README.md`'s "What's built" and "What can only be
+   confirmed live" sections for the full writeup.
+
+   **Confirmed live, 2026-09-10**, against `homelab-dev`, clicking through the real page (not curl):
+   Install on `hello-module` showed the disabled "Installing…" state, a "queued" note, and — this
+   needed one extra fix along the way, see below — resolved on its own to `Healthy` with a real Remove
+   button once checked back on. Remove showed the confirm/cancel step with the "can take a few minutes"
+   note, fired successfully (workflow succeeded, commit landed), and hit the `modules-root` prune gap
+   exactly as expected: the row never resolved on its own, and after 2 minutes correctly fell back to
+   "Still processing — refresh in a bit to check, or try again below" rather than staying stuck — the
+   manual `kubectl -n argocd delete application hello-module` workaround then resolved it immediately,
+   confirming this branch's timeout fallback and the existing workaround both hold under a second real
+   exercise (see the updated `docs/known-issues.md` entry).
+
+   One real deploy-pipeline issue found and fixed along the way, not a code bug: right after merge, the
+   Add-ons page kept showing the *old* read-only UI even though Argo CD reported `ui-shell` `Synced`/
+   `Healthy` on the merge commit. Root cause — `ui-shell`'s image tag is the mutable `:dev`, not a
+   per-commit digest, so Argo CD's sync status only reflects whether the Deployment's *spec* (which
+   always just says `:dev`) matches git, not whether the running pod has actually pulled today's build;
+   the pod was 12 hours old and had simply never been asked to re-pull. `imagePullPolicy: Always` means
+   it would have, given the chance — `sudo kubectl -n ui-shell rollout restart deployment ui-shell`
+   forced it and the digest changed as expected. Worth remembering for every future `ui-shell`/gateway
+   branch: merging to `dev` and confirming Argo CD is `Synced` is not sufficient proof the new build is
+   actually running — a changed image digest after a rollout (or a restart) is the real check.
+
+   **Considered and deferred, not built:** a "Force cleanup" action (a new gateway endpoint deleting
+   the orphaned `Application` via Argo CD's own API, surfaced as a UI button only once a Remove has
+   timed out) to make the `modules-root` workaround a click instead of a terminal command. Decided
+   against scope-creeping this branch; documented as a deferred idea, including the one design decision
+   already made for whenever it's picked up (Argo CD's REST API over a direct Kubernetes RBAC grant,
+   and why it must never fire automatically on click — see `docs/known-issues.md`'s updated entry for
+   the full reasoning, including the race condition with the workflow's own git push that rules out
+   firing it immediately).
 8. **Reverse-proxying into a module's own UI** ("deep-links into each module's own UI," §2 — the
    only phrase touching this anywhere, undefined beyond that). Needs `proxyTo` actually propagated
    into the deployed `Application` (currently inert, see "What already exists" above) plus a new
