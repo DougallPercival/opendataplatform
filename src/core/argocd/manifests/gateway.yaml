@@ -272,6 +272,7 @@ spec:
 # Same file/Application as everything above (apps/core/gateway.yaml's `directory.include:
 # "gateway.yaml"` already scopes to this one file) — no new Application needed, matching how this
 # file already carries the Deployment/Service/RBAC/Certificate/Ingress together.
+---
 apiVersion: bitnami.com/v1alpha1
 kind: SealedSecret
 metadata:
@@ -279,9 +280,8 @@ metadata:
   namespace: gateway
 spec:
   encryptedData:
-    token: PLACEHOLDER-run-bootstrap/seal-gateway-github-token.sh-to-generate-the-real-value
+    token: AgA7irK70ZCSl1lbTHuIobN22F8SMwmYZdmoH2u6gvuqcgQLoLLiGvkQc7SzIf+R9YhUKBz1fv75pUVRe2/9jAugO7C5/V3vpIQ11c+LWS7G7G+Bg5On6dn/9FzzGa0ofJMbA6Q2pYIxQ7gLvEAx4tBOttvLcoNanlAb+fibGZ1ybruE29u8tH5MNBRYHNqGTgN4r0qj0GQZomwU2C7uxr93J+mIMNae1TqBl8o4/Jj/ooPnGzSVsgfwGVp3QBFiwG45emdORIaLg5ybhVm5okirI7S1ob705gOJqHofFoY+SEwHnBsL6Kic7koD29V6NnhPGlUemZkoll6nPAp1Uzo82YjpqNGxMcF2QYbUDZtsE6iIptnoFIyve9avJ6rwjok2yEu1m62KbdIY0O14mixsw1lZIrwEaBZSi+HQTAivPWL5hlQE+kXc1Kv/RFFK/Hz2gU5N3L+lruvM71AREJgDu4nnxqApSZ0g14gg8boTIj1P4B7eNp3cUUsvyu/OKYxyr9otcgB5HOurz4GL3ufBQV7iSL2UOMsiLM7LHNzs8B83m2Bs+Do49DZLNKMLhCGQsO2rXi0amPFh1qkm4vheGfmBnk+aZhXx+vBwzdx1+b3tZlwiNu9HOFNLP0rA8FC538gGAEjY3+miDr8MS3BIQ5/+fbHgPAaq2PCDfhHkVZMTdQHdFhmwrPurt1d6WGthGDJxKnuTCbKezH6e9Bc9iiHB7fsgHI69iB9+cGsm27Xz2EjBd8qLlx+i14BhwK0yGVZ1c8zBnmIKy+qh0vi9vJltbcEXPPsIBYBL+g1KPOcOXf5WCR2TEFLjZTg=
   template:
     metadata:
       name: gateway-github-token
       namespace: gateway
-    type: Opaque
