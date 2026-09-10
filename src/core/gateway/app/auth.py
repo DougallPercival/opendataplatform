@@ -169,6 +169,23 @@ def derive_headers(claims: dict, x_workspace: str | None) -> DerivedHeaders:
     )
 
 
+def require_role(derived: DerivedHeaders, minimum: str) -> None:
+    """Raises AuthError(403, ...) unless `derived.role` is at least as privileged as `minimum`, per
+    _ROLE_PRIORITY's existing owner > editor > viewer ordering (lower index = more privileged).
+    First caller of that ordering for anything beyond plain membership — every route until this one
+    (ui-shell-plan.md item 7's mutation mechanism, feature/gateway-module-lifecycle-dispatch branch,
+    2026-09-10) only ever checked that derive_headers() didn't raise at all, never *which* role it
+    returned. Always call this AFTER require_auth()/derive_headers() has already succeeded — it
+    trusts `derived.role` completely, the same way derive_headers() itself is only ever called with
+    already-verified claims."""
+    if _ROLE_PRIORITY.index(derived.role) > _ROLE_PRIORITY.index(minimum):
+        raise AuthError(
+            403,
+            f"This requires at least {minimum!r} role in workspace {derived.workspace!r} — you have "
+            f"{derived.role!r}. Ask a workspace owner to change your role.",
+        )
+
+
 async def require_auth(authorization: str | None, x_workspace: str | None, jwks: JWKSCache) -> DerivedHeaders:
     """Thin composition of verify_token()+derive_headers() for routes other
     than proxy.py's catch-all — added platform-module-deps branch, 2026-09-03,

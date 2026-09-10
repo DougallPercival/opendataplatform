@@ -20,6 +20,14 @@ fourth command, added later than the three above — it also never touches git (
 docstring), so `handle_module_errors` still covers its one failure surface (`ManifestError` from a
 malformed module.yaml) without needing a third decorator.
 
+`install`'s `--repo-url` (ui-shell-plan.md item 7's mutation mechanism, feature/gateway-module-
+lifecycle-dispatch branch, 2026-09-10): an optional override for the repoURL embedded in the
+generated Application, replacing `discover_repo_url()`'s `git remote get-url origin` when set. Every
+plain interactive call leaves this unset and is completely unaffected — it exists for
+`.github/workflows/module-lifecycle.yml`, whose `actions/checkout`-provided `origin` is the HTTPS
+form, not the SSH form every self-referencing Application (and Argo CD's own configured repo
+credential) actually uses; see that workflow's own comment for the full "why."
+
 install/uninstall are the only two of these four that touch git — `scaffold` deliberately
 doesn't commit anything (see its own docstring below). Both install and uninstall:
 1. Resolve the repo root from the CWD (`repo.find_repo_root`).
@@ -105,6 +113,16 @@ def install(
         "--skip-requires-check",
         help="Skip verifying this module's `requires: [...]` are installed and healthy first.",
     ),
+    repo_url_override: str | None = typer.Option(
+        None,
+        "--repo-url",
+        help="Override the repoURL embedded in the generated Application, instead of discovering it "
+        "from `git remote get-url origin`. For automated callers whose checkout's own `origin` "
+        "doesn't match what Argo CD is configured to read from — see .github/workflows/"
+        "module-lifecycle.yml, which passes this explicitly rather than trusting actions/checkout's "
+        "HTTPS-form origin (a real, live-confirmed mismatch — see this branch's plan for the full "
+        "reasoning). Every plain interactive invocation should leave this unset.",
+    ),
 ) -> None:
     repo_root = find_repo_root(Path.cwd())
     manifest_path = repo_root / MODULES_DIR / name / "module.yaml"
@@ -119,7 +137,7 @@ def install(
 
     _check_requires(ctx, manifest, skip_requires_check)
 
-    repo_url = discover_repo_url(repo_root)
+    repo_url = repo_url_override or discover_repo_url(repo_root)
     chart_path = f"{CHARTS_DIR}/{manifest.id}"
     application_yaml = render_application_manifest(manifest, repo_url=repo_url, chart_path=chart_path)
 

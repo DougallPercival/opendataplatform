@@ -116,16 +116,61 @@ reinstalled module's Application annotations can — ARCHITECTURE.md §3 scopes 
 them — `check-requirements` above still owns that; a future Install button (item 7) is the actual
 consumer.
 
+## Install/uninstall dispatch (2026-09-10, feature/gateway-module-lifecycle-dispatch branch)
+
+`docs/architecture/ui-shell-plan.md` item 7's mutation mechanism — the backend half only (wiring the
+Add-ons page's own Install button is a separate future branch, same item-6→7 split the static catalog
+above already used). `POST /modules/{module_id}/install` and `POST /modules/{module_id}/uninstall`
+don't touch git themselves: gateway holding a git-write credential was the one design this branch
+explicitly rejected. Instead each endpoint calls `app/github_dispatch.py`'s
+`trigger_module_workflow()`, which asks the GitHub API to start a `workflow_dispatch` run of
+`.github/workflows/module-lifecycle.yml` — that workflow (unchanged `platform module
+install`/`uninstall` underneath) does the actual commit and push, authenticated with GitHub Actions'
+own ephemeral, auto-scoped `GITHUB_TOKEN` (the same credential `ci.yml` already uses for GHCR pushes,
+here granted `contents: write` instead of `packages: write`, and only for that one job). Both
+endpoints are fire-and-forget: a `202` means the workflow was told to start, nothing here waits for or
+reports back on how it went — `GET /modules/catalog`/`GET /modules` (above) are how a future UI would
+eventually observe the status flip once Argo CD reconciles the workflow's commit.
+
+`require_role()` (`app/auth.py`) is new and is the first thing in this service to check
+`derived.role` for anything beyond plain membership — every route before this branch only ever
+confirmed `derive_headers()` didn't raise at all. Both endpoints require at least **editor**:
+`_ROLE_PRIORITY`'s existing `owner > editor > viewer` ordering, viewer gets `403`. `install` also
+reuses `check-requirements`'s own comparison (`list_module_applications()` +
+`_SATISFIED_STATUS`/`_NOT_INSTALLED_STATUS`) for a `409` on unsatisfied `requires` — "the dependency
+check lives once, at the API layer every door calls through" now has a third caller, not a second
+implementation — and does **not** block reinstalling an already-`Healthy` module, since
+`platform_cli/manifest.py`'s own docstring already documents that as safe.
+
+### GitHub PAT for the module-lifecycle dispatch
+
+`GATEWAY_GITHUB_TOKEN` (`app/config.py`'s `github_token`) is a **fine-grained GitHub Personal Access
+Token, scoped to this one repo, with Repository permission `Actions: Read and write` and nothing
+else** — specifically **not** `Contents`, since the actual git commit/push never uses this token (see
+above). Create it under GitHub → Settings → Developer settings → Fine-grained tokens → "Only select
+repositories" → this repo, then run `bootstrap/seal-gateway-github-token.sh` from a real checkout with
+`kubectl`/`kubeseal` on `PATH` — it prompts for the PAT (hidden input, never a CLI argument or env
+var), fetches your own `homelab-dev` cluster's real sealed-secrets public cert, and overwrites the
+placeholder `SealedSecret` document at the bottom of `argocd/manifests/gateway.yaml` with the real
+sealed ciphertext. You still commit and push that file yourself — the script never touches git. This
+is this repo's **first** real use of sealed-secrets: the controller (`apps/core/sealed-secrets.yaml`)
+has been deployed since day one but never actually had anything sealed with it before this branch.
+Once the sealed value is pushed and the controller has decrypted it into a real `Secret`
+(`kubectl -n gateway get secret gateway-github-token`), roll gateway out
+(`kubectl -n gateway rollout restart deployment/gateway`) to pick it up — a missing/unconfigured token
+degrades to a `503` on both endpoints (`GitHubDispatchError`), never a crash.
+
 ## What's NOT built yet — the rest of ARCHITECTURE.md's gateway scope
 
-Dependency-checking, CORS, the installed-modules registry, and the Add-ons page's static catalog are
-real now (above), and `ui-shell` itself now calls `GET /modules` for its real nav
-(`docs/architecture/ui-shell-plan.md` item 5, `feature/ui-shell-nav` branch, 2026-09-09 — see
-`src/core/ui-shell/README.md`). Still not built: the Add-ons *page* itself in `ui-shell` (this
-endpoint's own UI), Install/Remove buttons, and reverse-proxying into other modules' own UIs
-(ARCHITECTURE.md §3, items 7-8). This service still proxies to exactly
-one backend, `catalog-service`, at one fixed URL; reverse-proxying into a module's own UI (item 8)
-is future work once `proxyTo` is propagated the same way `displayName`/`icon`/`navPath` are here.
+Dependency-checking, CORS, the installed-modules registry, the Add-ons page's static catalog, and the
+install/uninstall dispatch mechanism are real now (above), and `ui-shell` itself now calls
+`GET /modules` for its real nav (`docs/architecture/ui-shell-plan.md` item 5, `feature/ui-shell-nav`
+branch, 2026-09-09 — see `src/core/ui-shell/README.md`). Still not built: the Add-ons *page* itself in
+`ui-shell` actually calling the two new endpoints above (its Install button is still disabled), and
+reverse-proxying into other modules' own UIs (ARCHITECTURE.md §3, item 8). This service still proxies
+to exactly one backend, `catalog-service`, at one fixed URL; reverse-proxying into a module's own UI
+(item 8) is future work once `proxyTo` is propagated the same way `displayName`/`icon`/`navPath` are
+here.
 
 NetworkPolicy enforcement isolating catalog-service's namespace ingress to gateway's namespace only is
 also deferred — see `docs/known-issues.md`. k3s's bundled Network Policy controller is enabled by

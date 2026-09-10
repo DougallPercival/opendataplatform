@@ -142,6 +142,24 @@ def test_install_writes_commits_and_pushes(git_repo):
     assert _head(repo_root) == _remote_head(repo_root)  # actually pushed
 
 
+def test_install_repo_url_override_replaces_discovered_url(git_repo):
+    # ui-shell-plan.md item 7's mutation mechanism (feature/gateway-module-lifecycle-dispatch,
+    # 2026-09-10) — module-lifecycle.yml passes this explicitly since actions/checkout's own
+    # `origin` is the HTTPS form, not the SSH form every self-referencing Application expects.
+    repo_root, origin_url = git_repo
+    _scaffold_and_commit(repo_root, "hello")
+
+    override = "git@github.com:DougallPercival/opendataplatform.git"
+    result = runner.invoke(
+        app, ["install", "hello", "--skip-requires-check", "--repo-url", override]
+    )
+    assert result.exit_code == 0, result.output
+
+    content = (repo_root / "src/modules-enabled/hello.yaml").read_text()
+    assert f"repoURL: {override}" in content
+    assert origin_url not in content
+
+
 def test_install_wires_placement_from_module_yaml(git_repo):
     repo_root, _ = git_repo
     _scaffold_and_commit(repo_root, "hello")

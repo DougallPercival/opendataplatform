@@ -16,6 +16,13 @@ ui-shell-plan.md item 6) additionally needs a fake static module index on
 disk — `static_index` below points `settings.static_module_index_path` at
 a tmp_path file, the same monkeypatch-a-Settings-attribute pattern
 test_argocd.py already uses for k8s_sa_token_path/k8s_sa_ca_path.
+
+POST /modules/{module_id}/install and POST /modules/{module_id}/uninstall (feature/gateway-
+module-lifecycle-dispatch, 2026-09-10, ui-shell-plan.md item 7) additionally mock the GitHub
+dispatch call itself via respx (`_mock_dispatch`) — same "mock at the real HTTP boundary" precedent
+as the Kubernetes API and Keycloak JWKS above, not a monkeypatched trigger_module_workflow(). The
+`github_token` fixture points settings.github_token at a fake value; its absence (used deliberately
+in one test) exercises the real "PAT not configured yet" 503 path.
 """
 from __future__ import annotations
 
@@ -520,4 +527,224 @@ def test_catalog_returns_503_when_kubernetes_api_is_unreachable(
     with TestClient(app) as client:
         response = client.get("/modules/catalog", headers={**auth_header, "X-Workspace": "personal"})
 
+    assert response.status_code == 503
+
+
+# ---- POST /modules/{module_id}/install, POST /modules/{module_id}/uninstall --------------
+# ui-shell-plan.md item 7's mutation mechanism (feature/gateway-module-lifecycle-dispatch,
+# 2026-09-10) — the trigger_module_workflow() call is mocked at the HTTP boundary via respx, same
+# "test the real integration boundary" precedent _mock_jwks/_mock_k8s already set, not monkeypatched
+# at the function level.
+
+
+def _dispatch_url() -> str:
+    return (
+        f"{settings.github_api_url}/repos/{settings.github_repo}/actions/workflows/"
+        f"{settings.github_workflow_file}/dispatches"
+    )
+
+
+def _mock_dispatch(status_code: int = 204):
+    return respx.post(_dispatch_url()).mock(return_value=httpx.Response(status_code))
+
+
+@pytest.fixture
+def github_token(monkeypatch):
+    monkeypatch.setattr(settings, "github_token", "fake-pat")
+
+
+def _viewer_header(sign_token) -> dict[str, str]:
+    token = sign_token({"groups": ["/workspaces/personal/viewer"]})
+    return {"Authorization": f"Bearer {token}", "X-Workspace": "personal"}
+
+
+@respx.mock
+def test_install_dispatches_workflow_and_returns_202(
+    jwk_dict, auth_header, mounted_sa, static_index, github_token
+):
+    _mock_jwks(jwk_dict)
+    _mock_k8s([])
+    static_index([_static_module("hello-module")])
+    dispatch = _mock_dispatch()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/install", headers={**auth_header, "X-Workspace": "personal"}
+        )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "module_id": "hello-module",
+        "action": "install",
+        "status": "queued",
+        "detail": "Argo CD will pick this up once the triggered workflow finishes and pushes.",
+    }
+    assert dispatch.called
+    sent_body = json.loads(dispatch.calls.last.request.content)
+    assert sent_body == {
+        "ref": settings.github_dispatch_ref,
+        "inputs": {"module_id": "hello-module", "action": "install"},
+    }
+
+
+@respx.mock
+def test_install_returns_404_for_module_not_in_static_catalog(
+    jwk_dict, auth_header, mounted_sa, static_index
+):
+    _mock_jwks(jwk_dict)
+    static_index([])  # empty catalog — hello-module isn't a known module
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/install", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 404
+
+
+@respx.mock
+def test_install_returns_409_when_requires_are_not_satisfied(jwk_dict, auth_header, mounted_sa, static_index):
+    _mock_jwks(jwk_dict)
+    _mock_k8s([])  # nothing installed, so "auth" is unsatisfied
+    static_index([_static_module("needs-auth", requires=["auth"])])
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/needs-auth/install", headers={**auth_header, "X-Workspace": "personal"}
+        )
+
+    assert response.status_code == 409
+    assert response.json()["unsatisfied"] == [
+        {"module_id": "auth", "satisfied": False, "status": "not installed"}
+    ]
+
+
+@respx.mock
+def test_install_allows_reinstalling_an_already_healthy_module(
+    jwk_dict, auth_header, mounted_sa, static_index, github_token
+):
+    # Deliberately NOT blocked — platform_cli/manifest.py's own docstring says reinstalling is a
+    # safe, supported operation ("overwrites this file in place and commits the diff").
+    _mock_jwks(jwk_dict)
+    _mock_k8s([_application("hello-module", "Healthy")])
+    static_index([_static_module("hello-module")])
+    _mock_dispatch()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/install", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 202
+
+
+@respx.mock
+def test_install_returns_503_when_github_dispatch_fails(
+    jwk_dict, auth_header, mounted_sa, static_index, github_token
+):
+    _mock_jwks(jwk_dict)
+    _mock_k8s([])
+    static_index([_static_module("hello-module")])
+    _mock_dispatch(status_code=401)  # e.g. an expired/revoked PAT
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/install", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 503
+
+
+@respx.mock
+def test_install_returns_503_when_github_token_is_not_configured(
+    jwk_dict, auth_header, mounted_sa, static_index
+):
+    # No github_token fixture here — settings.github_token stays "" (its real, dev-friendly default).
+    _mock_jwks(jwk_dict)
+    _mock_k8s([])
+    static_index([_static_module("hello-module")])
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/install", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 503
+
+
+@respx.mock
+def test_install_returns_403_for_a_viewer_role(jwk_dict, sign_token, mounted_sa):
+    _mock_jwks(jwk_dict)
+    with TestClient(app) as client:
+        response = client.post("/modules/hello-module/install", headers=_viewer_header(sign_token))
+    assert response.status_code == 403
+
+
+@respx.mock
+def test_install_returns_401_for_missing_authorization(mounted_sa):
+    with TestClient(app) as client:
+        response = client.post("/modules/hello-module/install", headers={"X-Workspace": "personal"})
+    assert response.status_code == 401
+
+
+@respx.mock
+def test_install_returns_400_for_missing_workspace_hint(jwk_dict, auth_header, mounted_sa):
+    _mock_jwks(jwk_dict)
+    with TestClient(app) as client:
+        response = client.post("/modules/hello-module/install", headers=auth_header)
+    assert response.status_code == 400
+
+
+@respx.mock
+def test_install_returns_422_for_an_invalid_module_id(jwk_dict, auth_header, mounted_sa):
+    _mock_jwks(jwk_dict)
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/NotValid/install", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 422
+
+
+@respx.mock
+def test_uninstall_dispatches_workflow_and_returns_202(jwk_dict, auth_header, mounted_sa, github_token):
+    _mock_jwks(jwk_dict)
+    _mock_k8s([_application("hello-module", "Healthy")])
+    dispatch = _mock_dispatch()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/uninstall", headers={**auth_header, "X-Workspace": "personal"}
+        )
+
+    assert response.status_code == 202
+    assert response.json()["action"] == "uninstall"
+    sent_body = json.loads(dispatch.calls.last.request.content)
+    assert sent_body["inputs"] == {"module_id": "hello-module", "action": "uninstall"}
+
+
+@respx.mock
+def test_uninstall_returns_404_when_module_is_not_installed(jwk_dict, auth_header, mounted_sa):
+    _mock_jwks(jwk_dict)
+    _mock_k8s([])
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/uninstall", headers={**auth_header, "X-Workspace": "personal"}
+        )
+    assert response.status_code == 404
+
+
+@respx.mock
+def test_uninstall_returns_403_for_a_viewer_role(jwk_dict, sign_token, mounted_sa):
+    _mock_jwks(jwk_dict)
+    with TestClient(app) as client:
+        response = client.post("/modules/hello-module/uninstall", headers=_viewer_header(sign_token))
+    assert response.status_code == 403
+
+
+@respx.mock
+def test_uninstall_returns_503_when_kubernetes_api_is_unreachable(jwk_dict, auth_header, mounted_sa):
+    _mock_jwks(jwk_dict)
+    respx.get(_k8s_url()).mock(side_effect=httpx.ConnectError("connection refused"))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/modules/hello-module/uninstall", headers={**auth_header, "X-Workspace": "personal"}
+        )
     assert response.status_code == 503

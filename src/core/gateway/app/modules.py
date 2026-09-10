@@ -44,14 +44,31 @@ nothing here computes satisfaction from them — a future Install button (item 7
 to show a disabled state with why, and `check-requirements` above already owns that computation
 ("the dependency check lives once, at the API layer both doors call through" — this endpoint only
 ever passes the raw list through).
+
+`POST /modules/{module_id}/install` and `POST /modules/{module_id}/uninstall` — ui-shell-plan.md
+item 7's mutation mechanism (feature/gateway-module-lifecycle-dispatch, 2026-09-10), backend only:
+the Add-ons page's Install button still isn't wired up to call these, a separate future branch. Both
+require `require_role(derived, "editor")` on top of `require_auth`'s usual membership check —
+gateway's first endpoints to gate on role rather than membership alone. On success, both dispatch
+`app/github_dispatch.py`'s `trigger_module_workflow()` and return 202 immediately — fire-and-forget;
+nothing here waits for or reports the triggered workflow's outcome, `GET /modules/catalog` above is
+how a caller would eventually observe the resulting status change once Argo CD reconciles. `install`
+reuses this file's own `_check_requires`-equivalent comparison (`list_module_applications()` +
+`_SATISFIED_STATUS`/`_NOT_INSTALLED_STATUS`, exactly `check-requirements`'s own logic — a third
+caller of the one place this comparison lives, not a second implementation of it) and 404s for a
+`module_id` absent from the static catalog; deliberately does NOT block re-installing an
+already-installed module (`platform_cli/manifest.py`'s own docstring: reinstalling is safe, "it
+overwrites this file in place"). `uninstall` 404s for a `module_id` with no live Application — the
+same "isn't installed" case `platform module uninstall` itself already refuses.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, Query, Request
+from fastapi import APIRouter, Header, Path, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.argocd import ArgoCDUnavailableError, list_module_applications, list_module_summaries
-from app.auth import AuthError, require_auth
+from app.auth import AuthError, require_auth, require_role
+from app.github_dispatch import GitHubDispatchError, trigger_module_workflow
 from app.jwks import JWKSCache
 from app.module_index import load_static_module_index
 
@@ -63,6 +80,12 @@ router = APIRouter()
 # dependency that isn't actually up yet isn't a dependency that's met.
 _SATISFIED_STATUS = "Healthy"
 _NOT_INSTALLED_STATUS = "not installed"
+
+# Matches ModuleManifest.id's own pattern (platform_cli/manifest.py) — defense in depth on a path
+# param that flows into a workflow_dispatch input and eventually a CLI positional arg (subprocess
+# argv, never shell-interpolated, so this isn't closing an injection hole so much as failing fast
+# with a clear 422 instead of a confusing downstream 404/workflow failure for an obviously-wrong id).
+_MODULE_ID_PATTERN = r"^[a-z0-9-]+$"
 
 
 @router.get("/modules/check-requirements")
@@ -167,3 +190,103 @@ async def list_module_catalog(
             for m in static_modules
         ]
     }
+
+
+@router.post("/modules/{module_id}/install")
+async def install_module(
+    request: Request,
+    module_id: str = Path(..., pattern=_MODULE_ID_PATTERN),
+    authorization: str | None = Header(default=None),
+    x_workspace: str | None = Header(default=None),
+):
+    jwks: JWKSCache = request.app.state.jwks
+    try:
+        derived = await require_auth(authorization, x_workspace, jwks)
+        require_role(derived, "editor")
+    except AuthError as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    static_modules = load_static_module_index()
+    entry = next((m for m in static_modules if m["id"] == module_id), None)
+    if entry is None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"{module_id!r} isn't a known module (not found in the static catalog)."},
+        )
+
+    try:
+        installed = await list_module_applications()
+    except ArgoCDUnavailableError as exc:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    # Same comparison check-requirements (above) already owns — a third caller reusing it, not a
+    # second implementation. Deliberately does NOT block re-installing an already-installed module;
+    # see this function's docstring in this module's top-level docstring for why.
+    unsatisfied = [
+        {"module_id": req_id, "satisfied": False, "status": installed.get(req_id, _NOT_INSTALLED_STATUS)}
+        for req_id in entry["requires"]
+        if installed.get(req_id, _NOT_INSTALLED_STATUS) != _SATISFIED_STATUS
+    ]
+    if unsatisfied:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": f"{module_id!r} declares requires that aren't installed and healthy yet.",
+                "unsatisfied": unsatisfied,
+            },
+        )
+
+    try:
+        await trigger_module_workflow(module_id, "install")
+    except GitHubDispatchError as exc:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "module_id": module_id,
+            "action": "install",
+            "status": "queued",
+            "detail": "Argo CD will pick this up once the triggered workflow finishes and pushes.",
+        },
+    )
+
+
+@router.post("/modules/{module_id}/uninstall")
+async def uninstall_module(
+    request: Request,
+    module_id: str = Path(..., pattern=_MODULE_ID_PATTERN),
+    authorization: str | None = Header(default=None),
+    x_workspace: str | None = Header(default=None),
+):
+    jwks: JWKSCache = request.app.state.jwks
+    try:
+        derived = await require_auth(authorization, x_workspace, jwks)
+        require_role(derived, "editor")
+    except AuthError as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    try:
+        installed = await list_module_applications()
+    except ArgoCDUnavailableError as exc:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    if module_id not in installed:
+        return JSONResponse(
+            status_code=404, content={"detail": f"{module_id!r} isn't installed — nothing to uninstall."}
+        )
+
+    try:
+        await trigger_module_workflow(module_id, "uninstall")
+    except GitHubDispatchError as exc:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "module_id": module_id,
+            "action": "uninstall",
+            "status": "queued",
+            "detail": "Argo CD will prune this module once the triggered workflow finishes and pushes.",
+        },
+    )
