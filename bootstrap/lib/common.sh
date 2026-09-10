@@ -49,3 +49,78 @@ detect_git_branch() {
   # before the first commit exists — same fix as .githooks/pre-commit.
   git -C "$(repo_root)" symbolic-ref --short HEAD 2>/dev/null || echo "main"
 }
+
+# Replaces ONE SealedSecret document inside a manifest file that can contain
+# more than one back to back — src/core/argocd/manifests/gateway.yaml has
+# carried two since ui-shell-plan.md item 8/feature/module-proxy, 2026-09-10
+# (gateway-github-token, item 7, and gateway-module-proxy-secret, item 8).
+#
+# Locates the document by its own metadata.name (unique per Secret), never
+# positionally. seal-gateway-github-token.sh's first version found "the last
+# bitnami.com/v1alpha1 document in the file" via `grep | tail -1` — a
+# shortcut that only ever worked because there was exactly one such document
+# at the time; a second SealedSecret in the same file makes it ambiguous,
+# and would silently make a re-run (e.g. rotating the GitHub PAT) overwrite
+# the WRONG document. This function is the fix, shared so both
+# seal-gateway-github-token.sh and seal-gateway-module-proxy-secret.sh apply
+# it identically rather than each carrying their own copy to keep in sync.
+#
+# Usage: replace_sealed_secret_document <manifest-file> <secret-name> <new-document-file>
+#   <new-document-file> must contain exactly one SealedSecret document with
+#   no leading/trailing '---' — exactly what `kubeseal --format yaml` prints.
+replace_sealed_secret_document() {
+  local manifest="$1" secret_name="$2" new_doc_file="$3"
+
+  # gateway.yaml's working-tree line endings depend on what checked it out
+  # (a Windows clone with core.autocrlf leaves real CRLFs on disk; a Linux
+  # one doesn't) — every comparison below strips a trailing \r before
+  # matching, so this works either way instead of silently finding nothing
+  # on a CRLF checkout. cut -d: -f1 below is unaffected (it stops at the
+  # first ':', which grep -n always emits plain).
+
+  local doc_start=""
+  while IFS= read -r line_no; do
+    # Every SealedSecret document in this file has the same fixed shape
+    # (apiVersion / kind / metadata: / name: ...), so the top-level
+    # metadata.name always sits exactly 3 lines after its own apiVersion
+    # line. Checked positionally like this, rather than just grepping
+    # "name: $secret_name" anywhere in the file, because that same string
+    # also appears deeper in the SAME document, indented under
+    # spec.template.metadata.name.
+    local name_line
+    name_line="$(sed -n "$((line_no + 3))p" "$manifest")"
+    name_line="${name_line%$'\r'}"
+    if [[ "$name_line" == "  name: ${secret_name}" ]]; then
+      doc_start="$line_no"
+      break
+    fi
+    # Dropped the trailing '$' anchor deliberately (see the file-wide note
+    # above) — a prefix match on this literal, distinctive string is
+    # unambiguous on its own without needing to also anchor the end.
+  done < <(grep -n '^apiVersion: bitnami\.com/v1alpha1' "$manifest" | cut -d: -f1)
+
+  [[ -n "$doc_start" ]] || die \
+    "Couldn't find a SealedSecret document named '${secret_name}' in ${manifest} — has this \
+file's structure changed? Check it by hand before re-running."
+
+  # Every document here is preceded by its own '---' separator, which is
+  # kept as-is; only the document body itself is replaced — from its
+  # apiVersion line through the line before the NEXT '---' (another
+  # document follows), or through EOF if this is the last document in the
+  # file. Anything after that next boundary (another document, plus its own
+  # explanatory comment block) is preserved untouched.
+  local keep_through=$((doc_start - 1))
+  local next_boundary
+  next_boundary="$(awk -v start="$doc_start" \
+    'NR > start { line = $0; sub(/\r$/, "", line); if (line == "---") { print NR; exit } }' \
+    "$manifest")"
+
+  local work_file
+  work_file="$(mktemp)"
+  head -n "$keep_through" "$manifest" > "$work_file"
+  cat "$new_doc_file" >> "$work_file"
+  if [[ -n "$next_boundary" ]]; then
+    tail -n "+${next_boundary}" "$manifest" >> "$work_file"
+  fi
+  mv "$work_file" "$manifest"
+}

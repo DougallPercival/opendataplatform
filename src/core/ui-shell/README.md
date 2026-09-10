@@ -171,11 +171,46 @@ lingering until someone runs the documented manual `kubectl delete application` 
 branch ships Remove with that caveat rather than blocking on fixing the gap first (this session's own
 scoping decision).
 
+## What's built (2026-09-10, feature/module-proxy branch) — a module's own UI, embedded
+
+Item 8 — the last item on `ui-shell-plan.md`'s build list. `ModuleDetail.tsx` used to show a static
+"isn't built yet" notice for every module; a module with `hasOwnUi` (new field on `Module`/`ModuleDto`,
+`src/modules/api.ts`, reflecting gateway's own new `has_own_ui`) now renders an embedded `<iframe>`
+showing that module's actual UI, right below the existing metadata block.
+
+Gateway is deliberately bearer-`Authorization`-header-only (see `src/core/gateway/README.md`'s CORS
+section), and a plain `<iframe src>` navigation structurally can't send a custom header — so this
+needed a real mechanism, not just a new `<iframe>` tag. New `src/modules/proxyToken.ts` calls gateway's
+`GET /modules/{id}/proxy-token` once per page view to mint a short-lived (5 min), module-scoped JWT;
+new `src/modules/useModuleProxyToken.ts` wraps that in the same derived-at-render idle/loading/success/
+error hook pattern `useModules.ts` already established, keyed on `moduleId:workspace:accessToken` (mint
+once per key change, no polling — a `refetch()` on the error state's Retry button mints a fresh one on
+demand instead). `ModuleDetail.tsx`'s new `ModuleFrame` sub-component then renders
+`<iframe src="{gateway}/modules/{id}/proxy/?token=...">` — the module's actual content streams back
+through gateway's new reverse-proxy route, with the token itself doing double duty as the thing that
+tells gateway which `X-Workspace`/`X-User`/`X-Role` to forward, since there's no request header to
+derive them from at that point. Full "why a token in a query param, not a cookie or a header" reasoning
+lives in `app/module_proxy.py`'s own module docstring (`src/core/gateway`) — this page doesn't
+re-derive any of it.
+
+`ModuleDetail.module.css` gained a `.page`/`.frame` split: the existing `.detail` block keeps its
+`max-width: 520px` for the metadata column, but the iframe (`.frame`, `width: 100%; height: 70vh`) is a
+sibling of it, not nested inside, since a whole other app's UI needs real width. A module installed
+before this branch (no `has_own_ui` yet) shows a reworded notice pointing at reinstalling
+(`platform module install <id>`) to pick it up, rather than the old "not built yet" language — the
+mechanism exists now, that module's `Application` just hasn't been re-rendered with the new
+`platform.io/proxy-to` annotation.
+
+**Known limitation** (not fixed by this branch, see gateway's own README for the full explanation): a
+module's own follow-up requests (relative `<script src>`/`fetch()` calls its page issues) don't carry
+the `?token=` — this is only proven correct end-to-end against `hello-module`, whose content is a
+single self-contained page with no follow-up requests of its own.
+
 ## What's NOT built yet
 
-Reverse-proxying into a module's own UI (item 8) — the last item on `ui-shell-plan.md`'s build list.
-Also still open, tracked separately in `docs/known-issues.md` rather than here since it's a platform
-issue and not specific to this page: the `modules-root` prune gap noted above.
+That closes out every item on `ui-shell-plan.md`'s build list. Still open, tracked separately in
+`docs/known-issues.md` rather than here since it's a platform issue and not specific to any one page:
+the `modules-root` prune gap noted above.
 
 ## Running it locally
 

@@ -125,3 +125,82 @@ async def test_missing_ca_file_raises_argocd_unavailable_without_any_http_call(m
 
     with pytest.raises(argocd.ArgoCDUnavailableError, match="CA bundle"):
         await argocd.list_module_applications()
+
+
+# --- get_module_proxy_target() — ui-shell-plan.md item 8, feature/module-proxy, 2026-09-10 ---
+
+
+@respx.mock
+async def test_get_module_proxy_target_returns_the_proxy_to_annotation(mounted_sa):
+    respx.get(K8S_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "hello-module",
+                            "annotations": {"platform.io/proxy-to": "http://hello-module.hello-module.svc:80"},
+                        },
+                        "status": {"health": {"status": "Healthy"}},
+                    }
+                ]
+            },
+        )
+    )
+
+    result = await argocd.get_module_proxy_target("hello-module")
+
+    assert result == "http://hello-module.hello-module.svc:80"
+
+
+@respx.mock
+async def test_get_module_proxy_target_is_none_when_installed_but_no_annotation(mounted_sa):
+    # A module installed before feature/module-proxy merged, not yet reinstalled.
+    respx.get(K8S_URL).mock(
+        return_value=httpx.Response(200, json={"items": [_application("hello-module", "Healthy")]})
+    )
+
+    result = await argocd.get_module_proxy_target("hello-module")
+
+    assert result is None
+
+
+@respx.mock
+async def test_get_module_proxy_target_is_none_when_not_installed(mounted_sa):
+    respx.get(K8S_URL).mock(return_value=httpx.Response(200, json={"items": []}))
+
+    result = await argocd.get_module_proxy_target("hello-module")
+
+    assert result is None
+
+
+@respx.mock
+async def test_list_module_summaries_has_own_ui_reflects_proxy_to_annotation(mounted_sa):
+    respx.get(K8S_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "hello-module",
+                            "annotations": {
+                                "platform.io/display-name": "Hello Module",
+                                "platform.io/proxy-to": "http://hello-module.hello-module.svc:80",
+                            },
+                        },
+                        "status": {"health": {"status": "Healthy"}},
+                    },
+                    {
+                        "metadata": {"name": "old-module", "annotations": {}},
+                        "status": {"health": {"status": "Healthy"}},
+                    },
+                ]
+            },
+        )
+    )
+
+    summaries = {s.module_id: s.has_own_ui for s in await argocd.list_module_summaries()}
+
+    assert summaries == {"hello-module": True, "old-module": False}

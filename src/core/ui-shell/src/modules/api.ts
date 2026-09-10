@@ -15,6 +15,11 @@ interface ModuleDto {
   icon: string
   nav_path: string | null
   status: string
+  // ui-shell-plan.md item 8 (feature/module-proxy, 2026-09-10) — whether
+  // GET /modules/{id}/proxy-token (./proxyToken.ts) has anywhere to forward
+  // to. Not the raw proxied URL itself — gateway never hands the browser its
+  // module's cluster-internal Service DNS name, only this flag.
+  has_own_ui: boolean
 }
 
 /** The shape the rest of ui-shell actually works with — camelCase, mirroring
@@ -26,6 +31,7 @@ export interface Module {
   icon: string
   navPath: string | null
   status: string
+  hasOwnUi: boolean
 }
 
 function fromDto(dto: ModuleDto): Module {
@@ -35,6 +41,7 @@ function fromDto(dto: ModuleDto): Module {
     icon: dto.icon,
     navPath: dto.nav_path,
     status: dto.status,
+    hasOwnUi: dto.has_own_ui,
   }
 }
 

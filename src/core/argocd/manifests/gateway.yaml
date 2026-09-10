@@ -119,6 +119,20 @@ spec:
                 secretKeyRef:
                   name: gateway-github-token
                   key: token
+            - name: GATEWAY_MODULE_PROXY_TOKEN_SECRET
+              # ui-shell-plan.md item 8 (feature/module-proxy, 2026-09-10) — app/module_proxy.py's
+              # short-lived, module-scoped proxy tokens (the ?token= an embedded iframe uses instead
+              # of an Authorization header — see that file's own module docstring for the full "why").
+              # An HS256 signing secret gateway both mints AND verifies itself, NOT an external
+              # credential like GATEWAY_GITHUB_TOKEN above — nothing outside gateway ever needs to
+              # know it. This repo's SECOND SealedSecret (see the bottom of this file); generate the
+              # real value with `bootstrap/seal-gateway-module-proxy-secret.sh`, which GENERATES it
+              # (`openssl rand -hex 32`) rather than prompting for one the way
+              # seal-gateway-github-token.sh does — there's no PAT to go create first.
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-module-proxy-secret
+                  key: secret
           volumeMounts:
             - name: keycloak-ca
               mountPath: /etc/gateway/keycloak-ca
@@ -284,4 +298,29 @@ spec:
   template:
     metadata:
       name: gateway-github-token
+      namespace: gateway
+---
+# This repo's SECOND SealedSecret — see the Deployment's GATEWAY_MODULE_PROXY_TOKEN_SECRET comment
+# above for the full "why" (ui-shell-plan.md item 8). Unlike gateway-github-token above, there's no
+# external credential to go generate first: this is a random signing secret gateway mints and verifies
+# entirely itself, so `bootstrap/seal-gateway-module-proxy-secret.sh` GENERATES the plaintext
+# (`openssl rand -hex 32`) rather than prompting for one.
+#
+# `encryptedData.secret` below is a PLACEHOLDER, not a working ciphertext — same reasoning as
+# gateway-github-token's own placeholder comment: kubeseal encrypts asymmetrically against a specific
+# cluster's own public key, so nothing produced outside your real `homelab-dev` cluster can ever
+# decrypt correctly there. Run `bootstrap/seal-gateway-module-proxy-secret.sh` to produce the real
+# encryptedData.
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: gateway-module-proxy-secret
+  namespace: gateway
+spec:
+  encryptedData:
+    secret: PLACEHOLDER-run-bootstrap/seal-gateway-module-proxy-secret.sh-against-your-real-cluster
+  template:
+    metadata:
+      name: gateway-module-proxy-secret
       namespace: gateway
