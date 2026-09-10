@@ -460,21 +460,32 @@ request routed through gateway (which is everything `platform-cli` sends — see
 `platform_sdk/client.py`) can no longer forge identity or role. See `deps.py`'s own docstring for
 the full picture from catalog-service's side.
 
-**What's still open, and why this entry isn't fully resolved yet:** nothing in the cluster currently
-stops another in-cluster pod from reaching catalog-service's `ClusterIP` Service *directly*,
-bypassing gateway entirely, and forging the exact same three headers gateway would otherwise
-control. k3s ships a Network Policy controller enabled by default alongside Flannel —
-`NetworkPolicy` resources ARE genuinely enforced on this cluster, not a silent no-op — but no policy
-restricting catalog-service's namespace ingress to gateway's namespace has been written yet. That's
-real, actionable follow-up work (not a "someday, if it ever matters" caveat), just not part of this
-branch. A `NetworkPolicy` in `catalog-service`'s namespace allowing ingress only from pods in the
-`gateway` namespace (matched by namespace label, e.g. `kubernetes.io/metadata.name: gateway`) would
-close it.
+**Network-layer gap, closed 2026-09-03 (`catalog-service-netpol` branch)** — corrected here
+2026-09-11 after this entry was found to have never been updated when that branch actually shipped
+(the manifest itself, and its own comments, have said "closed" since 2026-09-03; this doc just never
+caught up). `src/core/argocd/manifests/catalog-service.yaml` now includes a `NetworkPolicy`
+(`catalog-service-restrict-ingress`): ingress into `catalog-service`'s pods only from pods in the
+`gateway` namespace (matched via the `kubernetes.io/metadata.name` label every namespace gets
+automatically since k8s 1.21 — nothing needed to explicitly label `gateway`), restricted to port
+8000, the one port the Service exposes. Ingress-only on purpose — `catalog-service`'s own outbound
+traffic to Postgres/DNS is untouched.
 
-**Status:** application-layer gap closed by this branch. **Do not** put `catalog-service` behind an
-`Ingress`, a `LoadBalancer` Service, or anything else reachable off-cluster until the NetworkPolicy
-above exists too — today "anyone who can reach it" is still "any pod on this cluster," not yet
-narrowed to "anyone who went through gateway."
+**Confirmed live, 2026-09-11:** `sudo kubectl -n catalog-service get networkpolicy
+catalog-service-restrict-ingress` shows it applied on the real cluster (created `2026-09-03T06:12:28Z`,
+matching git exactly). A disposable pod in the `keycloak` namespace (deliberately not `gateway`)
+running `curl -v http://catalog-service.catalog-service.svc.cluster.local:8000/healthz` got a clean
+`Connection refused` in ~1ms — DNS resolved fine, so this is the policy rejecting the connection, not
+an unrelated failure. Gateway's own traffic to catalog-service (proven working throughout this same
+session, across every module/auth test) confirms the allowed path still works. The one risk the
+manifest's own comment flagged up front — that kubelet-sourced readiness/liveness probe traffic
+might not match a namespaceSelector-only rule, since it doesn't originate from a pod in any namespace
+— turned out to be a non-issue in practice: no ipBlock fallback was ever needed.
+
+**Status:** both the application-layer gap (platform-gateway-auth, 2026-09-02) and the network-layer
+gap (catalog-service-netpol, 2026-09-03) are closed and confirmed live. `catalog-service` can now
+safely stay off-limits to anything but gateway — still don't put it behind an `Ingress` or
+`LoadBalancer` Service, since that would reintroduce off-cluster reachability this NetworkPolicy
+never tried to address (it only restricts in-cluster, pod-to-pod traffic).
 
 ### `platform-cli-login`'s device-grant fields — one Keycloak-version detail confirmed only at bootstrap-script-run time
 

@@ -204,12 +204,16 @@ to exactly one backend, `catalog-service`, at one fixed URL; reverse-proxying in
 (item 8) is future work once `proxyTo` is propagated the same way `displayName`/`icon`/`navPath` are
 here.
 
-NetworkPolicy enforcement isolating catalog-service's namespace ingress to gateway's namespace only is
-also deferred — see `docs/known-issues.md`. k3s's bundled Network Policy controller is enabled by
-default and WOULD enforce a policy restricting this, but no such policy exists yet: today, any other
-in-cluster pod can still reach catalog-service's ClusterIP directly and forge these same three headers.
-Gateway closes the *application-layer* gap (nothing reaching catalog-service through gateway can forge
-identity/role anymore); the *network-layer* gap — bypassing gateway entirely — is still open.
+NetworkPolicy enforcement isolating catalog-service's namespace ingress to gateway's namespace only —
+**built and confirmed live, `catalog-service-netpol` branch, 2026-09-03** (this paragraph corrected
+2026-09-11; it had gone stale, still describing this as deferred well after it shipped — see
+`docs/known-issues.md`'s "catalog-service's auth was a placeholder" entry for the full writeup and
+live-verification). `src/core/argocd/manifests/catalog-service.yaml` carries a `NetworkPolicy`
+restricting ingress into catalog-service's pods to only the `gateway` namespace, on the one port it
+exposes. Gateway closes the *application-layer* gap (nothing reaching catalog-service through gateway
+can forge identity/role); the NetworkPolicy closes the *network-layer* one (nothing outside the
+`gateway` namespace can reach catalog-service's ClusterIP at all anymore, verified with a disposable
+pod elsewhere in the cluster getting a real `Connection refused`).
 
 ## Running it locally
 
