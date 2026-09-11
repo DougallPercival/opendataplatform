@@ -371,9 +371,14 @@ section to point at.
    resources — carries it automatically. Real, known trade-off: a third-party cookie from the browser's
    point of view (the iframe's origin differs from `ui-shell`'s top-level page origin), which some
    browsers block or partition by default — where that happens, it falls back to the original gap, not
-   worse. Built and unit-tested; not yet live-verified against a real second module, since
-   `hello-module`'s self-contained stock nginx page issues no follow-up requests of its own to prove it
-   against. See `src/core/gateway/README.md`'s matching section and `docs/known-issues.md`.
+   worse. **Confirmed live, 2026-09-11**, against `homelab-dev`, with `curl` standing in for a module's
+   own follow-up request (no real second module exists yet to prove it against a real browser): minted
+   a token, hit `.../proxy/?token=...`, and got back a `200` with `set-cookie:
+   mp_token_hello-module=...; HttpOnly; Max-Age=182; Path=/modules/hello-module/proxy; SameSite=none;
+   Secure` — then a second request to `.../proxy/` with **no `?token=` at all**, only that cookie, also
+   came back `200`. That's the exact contract a module's own `fetch()` needs; the server-side mechanism
+   is proven, a real browser/real-second-module test is the remaining gap. See `src/core/gateway/
+   README.md`'s matching section and `docs/known-issues.md`.
 
    **Confirmed live, 2026-09-10**, against `homelab-dev` and the real GitHub repo, end to end: `curl`
    against `GET /modules/hello-module/proxy-token` with a real editor-role token returned a JWT whose
