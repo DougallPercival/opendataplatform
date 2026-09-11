@@ -1,15 +1,21 @@
-// Talks to gateway's POST /modules/{id}/install and .../uninstall
-// (src/core/gateway/app/modules.py, ui-shell-plan.md item 7's mutation
-// mechanism — feature/gateway-module-lifecycle-dispatch, already
-// live-verified end to end against homelab-dev). Structurally a sibling of
-// ./api.ts's GET /modules/catalog wrapper, not a shared helper — same "hand-
-// rolled per endpoint" choice that file's own comment already makes, now
-// applied to a POST instead of a GET.
+// Talks to gateway's POST /modules/{id}/install, .../uninstall, and
+// .../force-cleanup (src/core/gateway/app/modules.py, ui-shell-plan.md item
+// 7's mutation mechanism — feature/gateway-module-lifecycle-dispatch, already
+// live-verified end to end against homelab-dev — plus feature/force-cleanup's
+// third endpoint). Structurally a sibling of ./api.ts's GET /modules/catalog
+// wrapper, not a shared helper — same "hand-rolled per endpoint" choice that
+// file's own comment already makes, now applied to POSTs instead of a GET.
 //
-// Both endpoints are fire-and-forget: a 202 means gateway told GitHub to
+// install/uninstall are fire-and-forget: a 202 means gateway told GitHub to
 // start the module-lifecycle workflow, nothing more. Neither call's success
 // means the module is actually installed/removed yet — see useAddonMutations
 // for how the rest of the page turns that into something a user can watch.
+// force-cleanup is different — it's a synchronous 200, the delete already
+// happened by the time the response comes back (see app/modules.py's
+// force-cleanup docstring for why) — but the caller (useAddonMutations)
+// still folds a successful call back into the same 'queued' mutation-state
+// shape as a fresh uninstall, so the existing polling/resolution machinery
+// picks up from there unmodified.
 import { gatewayBaseUrl } from '../modules/config'
 
 export type AddonMutationAction = 'install' | 'uninstall'
@@ -34,8 +40,12 @@ export class AddonMutationError extends Error {
   }
 }
 
-async function postMutation(action: AddonMutationAction, moduleId: string, workspace: string, accessToken: string, signal?: AbortSignal): Promise<void> {
-  const response = await fetch(`${gatewayBaseUrl()}/modules/${encodeURIComponent(moduleId)}/${action}`, {
+// `action` labels the error (and picks which mutation family a caller should
+// treat this as); `path` is the actual URL segment. These coincide for
+// install/uninstall but not for force-cleanup, which hits a third endpoint
+// while still being an 'uninstall'-family error if it fails.
+async function postMutation(action: AddonMutationAction, path: string, moduleId: string, workspace: string, accessToken: string, signal?: AbortSignal): Promise<void> {
+  const response = await fetch(`${gatewayBaseUrl()}/modules/${encodeURIComponent(moduleId)}/${path}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -59,16 +69,26 @@ async function postMutation(action: AddonMutationAction, moduleId: string, works
     throw new AddonMutationError(action, response.status, detail, unsatisfied)
   }
 
-  // 202's own JSON body ({module_id, action, status: "queued", detail}) has
-  // nothing the caller needs — the point of calling this is "did the
-  // dispatch succeed," not the echoed request. useAddonMutations tracks the
-  // "queued" state itself.
+  // The success body (202's {module_id, action, status: "queued", detail},
+  // or force-cleanup's 200 {module_id, action, status: "deleted", detail})
+  // has nothing the caller needs — the point of calling this is "did the
+  // request succeed," not the echoed body. useAddonMutations tracks
+  // mutation state itself.
 }
 
 export function installModule(moduleId: string, workspace: string, accessToken: string, signal?: AbortSignal): Promise<void> {
-  return postMutation('install', moduleId, workspace, accessToken, signal)
+  return postMutation('install', 'install', moduleId, workspace, accessToken, signal)
 }
 
 export function uninstallModule(moduleId: string, workspace: string, accessToken: string, signal?: AbortSignal): Promise<void> {
-  return postMutation('uninstall', moduleId, workspace, accessToken, signal)
+  return postMutation('uninstall', 'uninstall', moduleId, workspace, accessToken, signal)
+}
+
+/** The "Force cleanup" workaround, made callable — see app/modules.py's
+ * force-cleanup docstring and docs/known-issues.md's modules-root prune-gap
+ * entry for why this exists. Labeled as an 'uninstall'-family error on
+ * failure: it's conceptually finishing an uninstall that got stuck, not a
+ * fourth kind of mutation. */
+export function forceCleanupModule(moduleId: string, workspace: string, accessToken: string, signal?: AbortSignal): Promise<void> {
+  return postMutation('uninstall', 'force-cleanup', moduleId, workspace, accessToken, signal)
 }

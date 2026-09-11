@@ -67,13 +67,26 @@ token-minting endpoint and the `GET|POST|PUT|PATCH|DELETE /modules/{id}/proxy[/{
 route it authorizes, both deliberately a separate module from this one (registry/lifecycle concerns)
 and from `app/proxy.py` (one fixed, startup-known backend; module_proxy.py resolves a different
 backend per request).
+
+`POST /modules/{module_id}/force-cleanup` (feature/force-cleanup, 2026-09-10) — `docs/known-issues.md`'s
+deferred "Force cleanup" idea, now built: the manual `kubectl -n argocd delete application <id>`
+workaround for the `modules-root` prune gap, made clickable. Same `require_role(derived, "editor")`
+bar as install/uninstall, but synchronous (200, not 202) — no workflow to dispatch, `app/argocd.py`'s
+`delete_module_application()` IS the action. See that function's own docstring for why this reuses
+the gateway ServiceAccount's existing Kubernetes RBAC (broadened to allow `delete`) rather than a
+second, Argo-CD-native credential.
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Header, Path, Query, Request
 from fastapi.responses import JSONResponse
 
-from app.argocd import ArgoCDUnavailableError, list_module_applications, list_module_summaries
+from app.argocd import (
+    ArgoCDUnavailableError,
+    delete_module_application,
+    list_module_applications,
+    list_module_summaries,
+)
 from app.auth import AuthError, require_auth, require_role
 from app.github_dispatch import GitHubDispatchError, trigger_module_workflow
 from app.jwks import JWKSCache
@@ -298,5 +311,65 @@ async def uninstall_module(
             "action": "uninstall",
             "status": "queued",
             "detail": "Argo CD will prune this module once the triggered workflow finishes and pushes.",
+        },
+    )
+
+
+@router.post("/modules/{module_id}/force-cleanup")
+async def force_cleanup_module(
+    request: Request,
+    module_id: str = Path(..., pattern=_MODULE_ID_PATTERN),
+    authorization: str | None = Header(default=None),
+    x_workspace: str | None = Header(default=None),
+):
+    """`docs/known-issues.md`'s "Force cleanup" — a deliberate, manually-clicked alternative to
+    `sudo kubectl -n argocd delete application <module-id>` for the `modules-root` prune gap: an
+    uninstall's own workflow already succeeded (the git commit landed, `modules-enabled/*.yaml` is
+    gone) but Argo CD's automated prune skipped the orphaned `Application` anyway. Same
+    `require_role(derived, "editor")` bar as install/uninstall — this deletes a live cluster object,
+    not a read.
+
+    Deliberately synchronous, unlike install/uninstall's GitHub Actions dispatch: there's no workflow
+    to trigger here, `app/argocd.py`'s `delete_module_application()` IS the whole action, so this
+    returns 200 (not 202) once that Kubernetes API call itself completes — though the underlying
+    Deployment/Service teardown Argo CD's own finalizer performs can still take a few more moments
+    after that, same as it would after a manual `kubectl delete`.
+
+    404 for a `module_id` with no live Application uses the exact same check `uninstall_module` above
+    already makes — if there's no orphaned Application, there's nothing to force-clean.
+    """
+    jwks: JWKSCache = request.app.state.jwks
+    try:
+        derived = await require_auth(authorization, x_workspace, jwks)
+        require_role(derived, "editor")
+    except AuthError as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    try:
+        installed = await list_module_applications()
+    except ArgoCDUnavailableError as exc:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    if module_id not in installed:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"{module_id!r} has no live Application object — nothing to force-clean."},
+        )
+
+    try:
+        await delete_module_application(module_id)
+    except ArgoCDUnavailableError as exc:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "module_id": module_id,
+            "action": "force-cleanup",
+            "status": "deleted",
+            "detail": (
+                "The Application object has been deleted. Argo CD's own finalizer may take a few "
+                "more moments to finish tearing down its underlying resources."
+            ),
         },
     )
