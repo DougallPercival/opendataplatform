@@ -92,6 +92,15 @@ def configure_cors(app: FastAPI, settings: Settings) -> None:
     deliberately left at its default (False): identity stays bearer-token-
     in-Authorization-header (platform_sdk's existing pattern), never a
     cookie, so there's nothing cross-origin-cookie-shaped to allow.
+
+    One narrow, deliberate exception (2026-09-11, app/module_proxy.py): the module-proxy route sets a
+    short-lived, path-scoped cookie so a module's own iframe-embedded page can carry its proxy token on
+    relative follow-up requests. That cookie is never read by gateway's own CORS-governed cross-origin
+    surface here — it's set and read entirely within requests to gateway's own `/modules/{id}/proxy/...`
+    path, made either as a plain browser navigation (the iframe itself) or as a same-origin request the
+    module's OWN page issues to that same path, neither of which this CORSMiddleware config touches.
+    allow_credentials stays False; this doesn't need it to be true. See module_proxy.py's own module
+    docstring for the full reasoning.
     """
     if settings.cors_origin_list:
         app.add_middleware(

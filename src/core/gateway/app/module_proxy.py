@@ -30,14 +30,32 @@ hardcodes `algorithms=["RS256"]`, so an HS256 token is already structurally reje
 gateway without this check — `purpose` is a second, explicit layer on the one place that DOES accept
 HS256, so this token type can never be confused with, or accidentally accepted as, anything else.
 
-Known, deliberately out-of-scope limitation: the query-string token does NOT propagate to a module's
-own follow-up requests — any relative `<script src>`/`fetch()` the module's returned page issues
-resolves against the current document URL and drops the query string entirely, at any token expiry.
-This is only provably correct end-to-end against `hello-module` because its content (stock
-`nginx:stable`'s default page) is self-contained and issues no follow-up requests. A module with real
-frontend assets or its own backend calls would need a further fix (HTML rewriting to inject the token
-into relative URLs, or a narrowly path-scoped cookie carved out as a deliberate exception) that this
-branch does not attempt — see docs/known-issues.md.
+Follow-up requests (2026-09-11, feature/module-proxy-cookie branch): the query-string token alone never
+propagated to a module's own follow-up requests — any relative `<script src>`/`fetch()` the module's
+returned page issued resolved against the current document URL and dropped the query string entirely.
+Fixed not by rewriting response HTML (fragile — a regex/parser pass over arbitrary module-controlled
+markup, and it still couldn't fix a JS-issued `fetch()` building its own URL at runtime) but by ALSO
+setting the same token as a cookie, scoped to `Path=/modules/{module_id}/proxy`, on every successful
+proxied response (`_set_proxy_cookie` below). A relative request from the module's own page always
+stays under that exact path — the browser resolves it against the current document URL, which IS that
+path — so it carries the cookie automatically, no HTML rewriting and no change needed in the module's
+own code at all. This is a deliberate, narrow exception to main.py's "identity stays bearer-token-in-
+Authorization-header, never a cookie" rule (see configure_cors()'s own docstring there): that rule is
+about gateway's primary identity mechanism, not this one gateway-internal, 5-minute, module-and-path-
+scoped credential, which already deviated from it (the query param) for the same iframe-navigation
+reason before this fix existed.
+
+Real, known trade-off, not a bug: because the iframe's document origin (gateway's) differs from the
+top-level page's origin (ui-shell's), this cookie is a "third-party" cookie from the browser's own
+storage-partitioning point of view, regardless of `SameSite=None`. Safari (ITP) and Firefox (Total
+Cookie Protection) block or partition third-party cookies by default today; Chrome is moving the same
+direction. Where that happens, the cookie simply never gets attached — the module's follow-up requests
+fail exactly as they did before this fix (401, no `?token=`), not worse. `SameSite=None; Secure` is set
+so the cookie is at least accepted by browsers that do allow it; `Secure` requires the real HTTPS
+ingress this cluster already runs (cert-manager, `docs/known-issues.md`'s self-signed CA). Only provably
+correct end-to-end against `hello-module` (a single self-contained static page) — a module with a real
+multi-file frontend or its own backend calls is the real test this hasn't had yet; see
+`docs/known-issues.md` for the live-verification writeup once one exists.
 """
 from __future__ import annotations
 
@@ -87,13 +105,18 @@ def _mint_proxy_token(module_id: str, derived: DerivedHeaders) -> str:
     return jwt.encode(payload, settings.module_proxy_token_secret, algorithm="HS256")
 
 
-def _decode_proxy_token(token: str, module_id: str) -> DerivedHeaders:
+def _decode_proxy_token(token: str, module_id: str) -> tuple[DerivedHeaders, int]:
     """Raises AuthError exactly like verify_token()/derive_headers() do, so the two route handlers
     below can convert it to a JSONResponse the same way every other route in this package does.
     Deliberately refuses outright (401) if the secret isn't configured, the same defense-in-depth
     reasoning as _mint_proxy_token above refusing to sign with an empty key: an unconfigured-secret
     environment should never accept ANY token, not even one that happens to verify against an empty
-    string."""
+    string.
+
+    Returns the token's own `exp` claim alongside DerivedHeaders — not because callers care about
+    identity's shape any differently, but because _set_proxy_cookie (below) needs it to size the
+    follow-up-request cookie's Max-Age accurately, and re-decoding the token a second time just to read
+    one claim already proven valid here would be wasted work for no benefit."""
     if not settings.module_proxy_token_secret:
         raise AuthError(401, "Module proxy tokens aren't configured on this gateway.")
     try:
@@ -113,7 +136,41 @@ def _decode_proxy_token(token: str, module_id: str) -> DerivedHeaders:
     if claims.get("module_id") != module_id:
         raise AuthError(403, f"This token was minted for a different module than {module_id!r}.")
 
-    return DerivedHeaders(workspace=claims["workspace"], user=claims["user"], role=claims["role"])
+    derived = DerivedHeaders(workspace=claims["workspace"], user=claims["user"], role=claims["role"])
+    return derived, int(claims["exp"])
+
+
+def _proxy_cookie_name(module_id: str) -> str:
+    # module_id is already constrained to _MODULE_ID_PATTERN (^[a-z0-9-]+$) by FastAPI's own Path(...,
+    # pattern=...) validation on every route that accepts one — safe to interpolate directly into a
+    # cookie name with no further escaping.
+    return f"mp_token_{module_id}"
+
+
+def _set_proxy_cookie(response: StreamingResponse, module_id: str, token: str, exp: int) -> None:
+    """Lets a module's own follow-up requests — a relative <script src>/<link href>, or a same-path
+    fetch()/XHR its own bundle issues — carry the SAME proxy token the initial <iframe src> navigation
+    used, with no change needed in the module's own code: a browser resolves a relative URL against the
+    CURRENT document URL, which is always under .../modules/{module_id}/proxy/... for anything this
+    route ever serves, so `Path=`-scoping the cookie to that exact prefix is enough to guarantee it's
+    attached. See this file's own module docstring for the full "why a cookie, why it's a deliberate
+    exception, and its real third-party-cookie-blocking trade-off" reasoning.
+
+    Set fresh on EVERY successful proxied response (not just the first, query-param-authenticated one)
+    so Max-Age keeps tracking the token's real remaining lifetime as time passes. This never extends the
+    token's actual lifetime — _decode_proxy_token still enforces the JWT's own `exp` claim on every
+    single request regardless of what the cookie's Max-Age says — it only keeps the browser's expiry
+    bookkeeping accurate rather than fixed at whatever it was on the very first request.
+    """
+    response.set_cookie(
+        key=_proxy_cookie_name(module_id),
+        value=token,
+        max_age=max(0, exp - int(time.time())),
+        path=f"/modules/{module_id}/proxy",
+        httponly=True,
+        secure=True,
+        samesite="none",
+    )
 
 
 def _sanitize_frame_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -184,15 +241,21 @@ async def mint_module_proxy_token(
 
 
 async def _proxy_module_request(module_id: str, path: str, request: Request):
-    token = request.query_params.get("token")
+    # ?token= (the initial <iframe src> navigation, which can't send a header at all) takes priority
+    # over the cookie (a follow-up request the module's own page issued) when, implausibly, both are
+    # present — a query param is always the caller's most explicit, freshest statement of intent.
+    token = request.query_params.get("token") or request.cookies.get(_proxy_cookie_name(module_id))
     if not token:
         return JSONResponse(
             status_code=401,
-            content={"detail": "Missing ?token= — fetch one from GET /modules/{id}/proxy-token first."},
+            content={
+                "detail": "Missing ?token= and no module-proxy cookie — fetch one from "
+                "GET /modules/{id}/proxy-token first."
+            },
         )
 
     try:
-        derived = _decode_proxy_token(token, module_id)
+        derived, exp = _decode_proxy_token(token, module_id)
     except AuthError as exc:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
@@ -218,7 +281,14 @@ async def _proxy_module_request(module_id: str, path: str, request: Request):
     # later `.update()` adding a differently-cased "X-Workspace" key doesn't overwrite it in a plain
     # Python dict — it creates a SECOND header, and httpx sends both, comma-joined, to the module. Same
     # "never client-declared" discipline proxy.py's own comment on this exact point already documents.
-    _client_supplied_auth_headers = {"authorization", "x-workspace", "x-user", "x-role"}
+    #
+    # "cookie" wasn't a concern for proxy.py's own version of this same exclusion set — this codebase
+    # never set a cookie before _set_proxy_cookie above. Now that a follow-up request from the module's
+    # own page carries our `mp_token_{module_id}` cookie (that's the whole point of it), it has to be
+    # stripped here for the same reason `token` is stripped from outbound_params below: it's gateway's
+    # own internal auth artifact for THIS route, never something the module's own backend should ever
+    # see forwarded to it.
+    _client_supplied_auth_headers = {"authorization", "x-workspace", "x-user", "x-role", "cookie"}
     outbound_headers = {
         key: value
         for key, value in request.headers.items()
@@ -260,12 +330,14 @@ async def _proxy_module_request(module_id: str, path: str, request: Request):
             finally:
                 await upstream_response.aclose()
 
-        return StreamingResponse(
+        response = StreamingResponse(
             stream_body(),
             status_code=upstream_response.status_code,
             headers=response_headers,
             media_type=upstream_response.headers.get("content-type"),
         )
+        _set_proxy_cookie(response, module_id, token, exp)
+        return response
 
 
 # Two routes, one handler — Starlette's {path:path} converter only matches when the URL has the

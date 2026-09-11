@@ -362,13 +362,18 @@ section to point at.
    README.md`'s "Reverse-proxying into a module's own UI" section and `src/core/ui-shell/README.md`'s
    matching entry.
 
-   **Known limitation, not fixed by this branch**: the `?token=` query param doesn't propagate to a
-   module's own follow-up requests — a relative `<script src>`/`fetch()` a module's page issues
-   resolves against the current document URL and drops the query string entirely. This branch is
-   only provably correct end-to-end against `hello-module`, whose content (stock `nginx:stable`'s
-   default page) is self-contained and issues no follow-up requests of its own. A module with real
-   frontend assets or backend calls of its own would need a further fix (HTML rewriting to inject the
-   token into relative URLs, or a narrowly path-scoped cookie carved out as a deliberate exception).
+   **Follow-up-request propagation, fixed 2026-09-11** (a later branch, not this one): the `?token=`
+   query param alone never propagated to a module's own follow-up requests — a relative
+   `<script src>`/`fetch()` a module's page issues resolves against the current document URL and drops
+   the query string entirely. `app/module_proxy.py`'s `_set_proxy_cookie` now also sets the token as a
+   cookie scoped to `Path=/modules/{module_id}/proxy` on every successful proxied response, so any
+   follow-up request under that path — including a JS-issued `fetch()`, not just markup-declared
+   resources — carries it automatically. Real, known trade-off: a third-party cookie from the browser's
+   point of view (the iframe's origin differs from `ui-shell`'s top-level page origin), which some
+   browsers block or partition by default — where that happens, it falls back to the original gap, not
+   worse. Built and unit-tested; not yet live-verified against a real second module, since
+   `hello-module`'s self-contained stock nginx page issues no follow-up requests of its own to prove it
+   against. See `src/core/gateway/README.md`'s matching section and `docs/known-issues.md`.
 
    **Confirmed live, 2026-09-10**, against `homelab-dev` and the real GitHub repo, end to end: `curl`
    against `GET /modules/hello-module/proxy-token` with a real editor-role token returned a JWT whose

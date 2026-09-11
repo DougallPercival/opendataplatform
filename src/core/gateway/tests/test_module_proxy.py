@@ -252,6 +252,71 @@ def test_proxy_strips_the_token_query_param_but_forwards_others(sign_proxy_token
 
 
 @respx.mock
+def test_proxy_sets_a_path_scoped_cookie_on_success(sign_proxy_token, mounted_sa):
+    token = sign_proxy_token("hello-module")
+    _mock_k8s([_application("hello-module")])
+    respx.get(f"{MODULE_BASE}/").mock(return_value=httpx.Response(200, text="root"))
+
+    with TestClient(app) as client:
+        response = client.get(f"/modules/hello-module/proxy?token={token}")
+
+    assert response.status_code == 200
+    set_cookie = response.headers["set-cookie"]
+    assert set_cookie.startswith(f"mp_token_hello-module={token}")
+    # Case-insensitive substring checks rather than a full Set-Cookie parse — this is asserting the
+    # attributes _set_proxy_cookie actually asked for are present, not re-deriving http.cookies'
+    # own exact capitalization convention.
+    lowered = set_cookie.lower()
+    assert "path=/modules/hello-module/proxy" in lowered
+    assert "httponly" in lowered
+    assert "secure" in lowered
+    assert "samesite=none" in lowered
+
+
+@respx.mock
+def test_proxy_accepts_the_token_from_the_cookie_with_no_query_param(sign_proxy_token, mounted_sa):
+    # Simulates the case this cookie exists for: a relative <script src>/fetch() a module's own page
+    # issues after the initial iframe load, which carries no ?token= at all.
+    token = sign_proxy_token("hello-module")
+    _mock_k8s([_application("hello-module")])
+    respx.get(f"{MODULE_BASE}/app.js").mock(
+        return_value=httpx.Response(
+            200, text="console.log(1)", headers={"content-type": "application/javascript"}
+        )
+    )
+
+    with TestClient(app) as client:
+        # Set on the client's own cookie jar rather than passed per-request — the latter is deprecated
+        # on recent httpx/starlette (ambiguous persistence semantics), and this test wants exactly the
+        # jar behavior anyway: a real browser's cookie jar is what actually carries this cookie on a
+        # module's own follow-up request in production.
+        client.cookies.set("mp_token_hello-module", token)
+        response = client.get("/modules/hello-module/proxy/app.js")
+
+    assert response.status_code == 200
+    assert response.text == "console.log(1)"
+
+
+@respx.mock
+def test_proxy_never_forwards_its_own_cookie_to_the_module(sign_proxy_token, mounted_sa):
+    # The Cookie header is gateway's own internal auth artifact for this one route — it must never
+    # reach the module's backend, the same "never client-declared" discipline that already governs
+    # Authorization/X-Workspace/X-User/X-Role above.
+    token = sign_proxy_token("hello-module")
+    _mock_k8s([_application("hello-module")])
+    module_route = respx.get(f"{MODULE_BASE}/").mock(return_value=httpx.Response(200, text="ok"))
+
+    with TestClient(app) as client:
+        client.cookies.set("mp_token_hello-module", token)
+        client.cookies.set("unrelated", "should-not-leak-either")
+        response = client.get("/modules/hello-module/proxy")
+
+    assert response.status_code == 200
+    sent = module_route.calls.last.request
+    assert "cookie" not in sent.headers
+
+
+@respx.mock
 def test_proxy_strips_x_frame_options_and_frame_ancestors(sign_proxy_token, mounted_sa):
     token = sign_proxy_token("hello-module")
     _mock_k8s([_application("hello-module")])
