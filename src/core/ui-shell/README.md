@@ -212,10 +212,11 @@ module-proxy as future work well after both shipped and were live-verified; see 
 What's still genuinely open: the module-proxy's query-string-token limitation for a module with real
 frontend assets or its own backend calls (see that section above). The recurring mutable-`:dev`-
 image-tag stale-pod gotcha that bit this page's own branches three separate times this session is now
-**built, not yet live-verified** (`ci.yml`'s git-sha annotation bump — see `argocd/README.md`'s
-matching section and `docs/known-issues.md`'s entry). Broader gaps against ARCHITECTURE.md's
-longer-term vision aren't scoped in this doc — track those in `ARCHITECTURE.md`/`docs/known-issues.md`
-as they come up.
+**fixed and confirmed live, 2026-09-11** (`ci.yml`'s git-sha annotation bump — see `argocd/README.md`'s
+matching section and `docs/known-issues.md`'s entry for the live-verification writeup: `ui-shell`'s
+deployed annotation and a fresh, zero-restart pod rollout both confirmed on `homelab-dev` with no
+manual `rollout restart`). Broader gaps against ARCHITECTURE.md's longer-term vision aren't scoped in
+this doc — track those in `ARCHITECTURE.md`/`docs/known-issues.md` as they come up.
 
 ## Running it locally
 

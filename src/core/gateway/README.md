@@ -272,12 +272,13 @@ item 8 for the full picture.
 What's still genuinely open: the module-proxy's query-string-token limitation for a module with real
 frontend assets or its own backend calls (see the "Reverse-proxying into a module's own UI" section
 above — provably correct today only against `hello-module`'s self-contained stock nginx page). The
-recurring mutable-`:dev`-image-tag stale-pod gotcha that used to be listed here too is now **built,
-not yet live-verified** (`ci.yml`'s git-sha annotation bump — see `argocd/README.md`'s matching
-section and `docs/known-issues.md`'s entry for the mechanism and what's left to confirm live).
-Broader, longer-term gaps against ARCHITECTURE.md's full vision (HA/multi-replica, observability,
-workspace-level resource quotas) aren't scoped here — `ARCHITECTURE.md` and `docs/known-issues.md`
-are the right place to track those as they come up, not this doc.
+recurring mutable-`:dev`-image-tag stale-pod gotcha that used to be listed here too is now **fixed and
+confirmed live, 2026-09-11** (`ci.yml`'s git-sha annotation bump — see `argocd/README.md`'s matching
+section and `docs/known-issues.md`'s entry for the live-verification writeup: all three services'
+annotations and fresh pod rollouts confirmed on `homelab-dev` with no manual `rollout restart`
+needed). Broader, longer-term gaps against ARCHITECTURE.md's full vision (HA/multi-replica,
+observability, workspace-level resource quotas) aren't scoped here — `ARCHITECTURE.md` and
+`docs/known-issues.md` are the right place to track those as they come up, not this doc.
 
 NetworkPolicy enforcement isolating catalog-service's namespace ingress to gateway's namespace only —
 **built and confirmed live, `catalog-service-netpol` branch, 2026-09-03** (this paragraph corrected

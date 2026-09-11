@@ -158,10 +158,17 @@ was chosen over a full YAML-parsing tool (these files are heavily hand-commented
 case, CRLF-terminated — a full parse/serialize round-trip risks exactly the kind of reformatting this
 repo has already been bitten by once, with the SealedSecret boundary-detection bug).
 
-**Status:** built 2026-09-11, not yet live-verified against `homelab-dev` — see
-`docs/known-issues.md`'s stale-pod entry for what confirming this live still needs (a real push,
-watching the annotation actually bump and a real rollout actually happen, ideally without a manual
-`rollout restart` anywhere in the loop).
+**Status:** confirmed live, 2026-09-11. Merging `feature/git-sha-rollout` (PR #55 + PR #56 — the
+`.github/` files landed in a follow-up commit after the remote file-write bridge's protected-path
+guard refused to write them directly) touched `ci.yml` itself, which sits in every package's own
+`paths:` filter — so that merge's push tripped all three `build-and-push-*` jobs at once, the first
+real exercise of all three new steps simultaneously. All three went green and each produced its own
+`chore(<service>): bump deployed git-sha annotation ...` commit on `dev`, all stamping the same
+`f0c7f1d...` merge-commit SHA. `kubectl get deploy <svc> -n <svc> -o jsonpath='...platform\.io/git-
+sha...'` read that exact SHA back for gateway, ui-shell, and catalog-service, and each service's pod
+came back with `RESTARTS: 0` and an age far younger than its Deployment object — a real new pod,
+rolled by Argo CD's `selfHeal` off the annotation-only commit alone, with no `kubectl rollout restart`
+run anywhere in the sequence. See `docs/known-issues.md`'s stale-pod entry for the full writeup.
 
 ## RBAC — gateway's Argo CD access (platform-module-deps branch, 2026-09-03; broadened feature/force-cleanup, 2026-09-10)
 
