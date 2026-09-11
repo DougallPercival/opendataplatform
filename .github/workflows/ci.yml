@@ -22,6 +22,11 @@
 # that directory as a CI step before its Docker build, so a module-only change has to flow through
 # gateway's own test+build+push, not just platform-cli's (which already watches src/modules/*
 # indirectly via its own tests, but never triggers a gateway rebuild on its own).
+# 2026-09-11: each of the three build-and-push* jobs gained a step that bumps its Deployment's
+# `platform.io/git-sha` pod-template annotation and pushes that straight back to the triggering
+# branch — closes docs/known-issues.md's recurring stale-pod gotcha (a moving `:dev` tag means
+# Synced/Healthy never proves a new image is actually running). See build-and-push's own step for
+# the full mechanism; the other two just reference it.
 name: CI
 
 on:
@@ -149,11 +154,12 @@ jobs:
     # without having to know that cascade rule.
     if: needs.changes.outputs.catalog_service == 'true'
     runs-on: ubuntu-latest
-    # Least-privilege: only this job ever touches GHCR, so only this job
-    # gets packages: write — `test` above inherits the workflow-level
-    # contents: read and nothing more.
+    # contents: write joined packages: write 2026-09-11 (fixing docs/known-issues.md's recurring
+    # stale-pod gotcha) — the new "Record this build's commit SHA" step below needs it to push its
+    # own small commit. Still least-privilege: only this job (and its two siblings below) ever
+    # need either permission; `test` above still inherits only the workflow-level contents: read.
     permissions:
-      contents: read
+      contents: write
       packages: write
     env:
       # Hardcoded lowercase — ${{ github.repository_owner }} would resolve
@@ -167,7 +173,13 @@ jobs:
       # value you change, alongside repoURL.
       IMAGE_NAME: ghcr.io/dougallpercival/catalog-service
     steps:
+      # fetch-depth: 0 (full history, not the default shallow depth-1) — the "Record this build's
+      # commit SHA" step below may need to `git fetch`/`rebase` against a newer remote tip if a
+      # second push landed while this job was building; that needs real shared history to work,
+      # not just the one commit a shallow clone gives you.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: docker/setup-buildx-action@v3
       # Build-only on PRs (proves the Dockerfile still builds cleanly) —
       # never push from a PR, and never even attempt to log in for one:
@@ -223,6 +235,56 @@ jobs:
             org.opencontainers.image.source=https://github.com/DougallPercival/opendataplatform
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # 2026-09-11, fixing docs/known-issues.md's recurring stale-pod gotcha: `:dev` is a moving
+      # tag (see the `tags:` comment above), so Argo CD reporting Synced/Healthy after a merge
+      # never actually proves the new image got pulled — imagePullPolicy: Always only repulls on
+      # a real pod restart, and nothing about a floating tag's own Deployment spec changes when
+      # the tag's target moves. This step closes that gap the same way `kubectl rollout restart`
+      # always has: patch the pod template (not just the image reference) so Kubernetes has no
+      # choice but to roll new pods. Specifically, it bumps
+      # manifests/catalog-service.yaml's `platform.io/git-sha` pod-template annotation
+      # (.github/scripts/set-git-sha-annotation.sh — see that script's own comment for the exact
+      # mechanism and why a plain sed instead of a YAML-parsing tool) to this run's commit SHA,
+      # commits, and pushes straight back to the branch that triggered this build — same
+      # `GITHUB_TOKEN`-with-contents:-write pattern module-lifecycle.yml already established for
+      # its own git-write step, just inline here instead of a separate dispatched workflow, since
+      # there's no cross-service auth boundary to cross (unlike gateway's own git-write avoidance,
+      # this is CI writing to its own repo, not a running service holding a git credential).
+      #
+      # Never loops: this only ever touches manifests/catalog-service.yaml, which isn't in this
+      # file's own `paths:` filter above, so the commit it pushes can't retrigger this workflow —
+      # confirmed by inspection, not just assumed, and reinforced with `[skip ci]` below as
+      # defense in depth. Skipped entirely on a pull_request event (nothing was pushed to GHCR to
+      # even bump the annotation for) and quietly does nothing if the annotation's already at this
+      # SHA (defensive idempotency, not expected to matter in the normal one-push-at-a-time case).
+      # The small retry loop covers the one real race this creates: a second push landing on this
+      # branch while this job was still building — `git push` gets rejected non-fast-forward, so
+      # this rebases the one-line commit onto the new tip and retries, same shape as the "install
+      # module + Remove-click's own workflow commit" divergence this exact push/pull race produced
+      # live earlier this session, just handled automatically here instead of by hand.
+      - name: Record this build's commit SHA on the Deployment
+        if: github.event_name == 'push'
+        run: |
+          git checkout -B ${{ github.ref_name }}
+          git config user.name "ci-git-sha-bot"
+          git config user.email "ci-git-sha-bot@users.noreply.github.com"
+          bash .github/scripts/set-git-sha-annotation.sh src/core/argocd/manifests/catalog-service.yaml ${{ github.sha }}
+          if git diff --quiet; then
+            echo "Annotation already at this SHA — nothing to commit."
+            exit 0
+          fi
+          git add src/core/argocd/manifests/catalog-service.yaml
+          git commit -m "chore(catalog-service): bump deployed git-sha annotation to ${{ github.sha }} [skip ci]"
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "Push rejected (likely a concurrent push to this branch) — retrying ($attempt/3)..."
+            git fetch origin ${{ github.ref_name }}
+            git rebase origin/${{ github.ref_name }}
+          done
+          echo "::error::Failed to push the git-sha annotation bump after 3 attempts"
+          exit 1
 
   test-gateway:
     name: Test gateway
@@ -254,8 +316,10 @@ jobs:
     # identical comment above.
     if: needs.changes.outputs.gateway == 'true'
     runs-on: ubuntu-latest
+    # contents: write + fetch-depth: 0 below: same reasoning as build-and-push's own identical
+    # comments above — this job's own "Record this build's commit SHA" step needs both.
     permissions:
-      contents: read
+      contents: write
       packages: write
     env:
       # Same hardcoded-lowercase reasoning as build-and-push's IMAGE_NAME
@@ -263,6 +327,8 @@ jobs:
       IMAGE_NAME: ghcr.io/dougallpercival/gateway
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -317,6 +383,32 @@ jobs:
             org.opencontainers.image.source=https://github.com/DougallPercival/opendataplatform
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Same mechanism as build-and-push's own identical step above (see that job's own long
+      # comment for the full "why") — gateway is the Deployment this gotcha has actually bitten,
+      # repeatedly, this session (docs/known-issues.md), so this is the job that matters most here.
+      - name: Record this build's commit SHA on the Deployment
+        if: github.event_name == 'push'
+        run: |
+          git checkout -B ${{ github.ref_name }}
+          git config user.name "ci-git-sha-bot"
+          git config user.email "ci-git-sha-bot@users.noreply.github.com"
+          bash .github/scripts/set-git-sha-annotation.sh src/core/argocd/manifests/gateway.yaml ${{ github.sha }}
+          if git diff --quiet; then
+            echo "Annotation already at this SHA — nothing to commit."
+            exit 0
+          fi
+          git add src/core/argocd/manifests/gateway.yaml
+          git commit -m "chore(gateway): bump deployed git-sha annotation to ${{ github.sha }} [skip ci]"
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "Push rejected (likely a concurrent push to this branch) — retrying ($attempt/3)..."
+            git fetch origin ${{ github.ref_name }}
+            git rebase origin/${{ github.ref_name }}
+          done
+          echo "::error::Failed to push the git-sha annotation bump after 3 attempts"
+          exit 1
 
   test-ui-shell:
     name: Test ui-shell
@@ -351,8 +443,10 @@ jobs:
     # identical comment above.
     if: needs.changes.outputs.ui_shell == 'true'
     runs-on: ubuntu-latest
+    # contents: write + fetch-depth: 0 below: same reasoning as build-and-push's own identical
+    # comments above — this job's own "Record this build's commit SHA" step needs both.
     permissions:
-      contents: read
+      contents: write
       packages: write
     env:
       # Same hardcoded-lowercase reasoning as build-and-push's IMAGE_NAME
@@ -360,6 +454,8 @@ jobs:
       IMAGE_NAME: ghcr.io/dougallpercival/ui-shell
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
         if: github.event_name == 'push'
@@ -384,6 +480,32 @@ jobs:
             org.opencontainers.image.source=https://github.com/DougallPercival/opendataplatform
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Same mechanism as build-and-push's own identical step above (see that job's own long
+      # comment for the full "why") — ui-shell is the OTHER Deployment this gotcha has actually
+      # bitten, repeatedly, this session (docs/known-issues.md).
+      - name: Record this build's commit SHA on the Deployment
+        if: github.event_name == 'push'
+        run: |
+          git checkout -B ${{ github.ref_name }}
+          git config user.name "ci-git-sha-bot"
+          git config user.email "ci-git-sha-bot@users.noreply.github.com"
+          bash .github/scripts/set-git-sha-annotation.sh src/core/argocd/manifests/ui-shell.yaml ${{ github.sha }}
+          if git diff --quiet; then
+            echo "Annotation already at this SHA — nothing to commit."
+            exit 0
+          fi
+          git add src/core/argocd/manifests/ui-shell.yaml
+          git commit -m "chore(ui-shell): bump deployed git-sha annotation to ${{ github.sha }} [skip ci]"
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "Push rejected (likely a concurrent push to this branch) — retrying ($attempt/3)..."
+            git fetch origin ${{ github.ref_name }}
+            git rebase origin/${{ github.ref_name }}
+          done
+          echo "::error::Failed to push the git-sha annotation bump after 3 attempts"
+          exit 1
 
   test-platform-packages:
     name: Test platform-sdk + platform-cli
