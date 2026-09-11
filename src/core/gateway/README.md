@@ -210,13 +210,20 @@ module's cluster-internal Service DNS name stays server-side-only. Since `proxyT
 `module.yaml` field, `has_own_ui` only ever reads `false` for the same transient "installed before
 this branch, not yet reinstalled" state items 4/6 already established for the other annotations.
 
-**Known, deliberately out-of-scope limitation:** the `?token=` query param doesn't propagate to a
-module's own follow-up requests — a relative `<script src>`/`fetch()` the module's page issues
-resolves against the current document URL and drops the query string entirely. This is only provably
-correct end-to-end against `hello-module`, whose content (stock `nginx:stable`'s default page) is
-self-contained and issues no follow-up requests. A module with real frontend assets or backend calls
-of its own would need a further fix (HTML rewriting to inject the token into relative URLs, or a
-narrowly path-scoped cookie carved out as a deliberate exception) — see `docs/known-issues.md`.
+**Fixed, 2026-09-11:** the `?token=` query param alone never propagated to a module's own follow-up
+requests — a relative `<script src>`/`fetch()` the module's page issues resolves against the current
+document URL and drops the query string entirely. `_set_proxy_cookie` (`app/module_proxy.py`) now also
+sets the same token as a cookie scoped to `Path=/modules/{module_id}/proxy` on every successful proxied
+response, so a follow-up request under that same path — including a JS-issued `fetch()`, not just
+markup-declared resources — carries it automatically, with no change needed in the module's own code.
+Chosen over HTML-rewriting the response body specifically because rewriting can't reach a `fetch()`
+building its own URL at runtime, only markup. Real, known trade-off: this is technically a third-party
+cookie (the iframe's origin differs from ui-shell's top-level page origin), which Safari/Firefox block
+or partition by default and Chrome is moving toward blocking too — where that happens, behavior falls
+back to exactly the pre-fix gap, not worse. Only provably correct end-to-end against `hello-module`
+(a single self-contained static page); a module with a real multi-file frontend or its own backend
+calls is the real test this hasn't had yet. See `app/module_proxy.py`'s own module docstring and
+`docs/known-issues.md` for the full writeup.
 
 **Confirmed live, 2026-09-10**, against `homelab-dev`: `curl` against the mint endpoint with a real
 editor-role token returned a JWT whose decoded claims matched exactly; `curl` against the proxy route
@@ -269,10 +276,12 @@ cleanup actions, real nav, and reverse-proxying into a module's own UI are all b
 page's buttons and item 8 as undone well after both shipped). See that plan doc's own closing note on
 item 8 for the full picture.
 
-What's still genuinely open: the module-proxy's query-string-token limitation for a module with real
-frontend assets or its own backend calls (see the "Reverse-proxying into a module's own UI" section
-above — provably correct today only against `hello-module`'s self-contained stock nginx page). The
-recurring mutable-`:dev`-image-tag stale-pod gotcha that used to be listed here too is now **fixed and
+What's still genuinely open: the module-proxy's follow-up-request cookie is **built, not yet
+live-verified against a real second module** (see the "Reverse-proxying into a module's own UI" section
+above — the mechanism is fixed and unit-tested, but only `hello-module`'s self-contained stock nginx
+page has ever actually been proxied through this route live; that page issues no follow-up requests, so
+it can't itself prove the cookie fix). The recurring mutable-`:dev`-image-tag stale-pod gotcha that used
+to be listed here too is now **fixed and
 confirmed live, 2026-09-11** (`ci.yml`'s git-sha annotation bump — see `argocd/README.md`'s matching
 section and `docs/known-issues.md`'s entry for the live-verification writeup: all three services'
 annotations and fresh pod rollouts confirmed on `homelab-dev` with no manual `rollout restart`

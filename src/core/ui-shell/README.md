@@ -169,10 +169,13 @@ system has never used cookies for identity. Loading/error states follow the same
 hook in this repo already uses (`describeProxyTokenError` renders gateway's own `detail` message
 verbatim, mirroring `AddonsListError`).
 
-**Known limitation, inherited from the backend and not fixed here:** the query-string token doesn't
-propagate to a module's own follow-up requests, so this is only provably correct end-to-end against
-`hello-module`'s self-contained stock nginx page — see `src/core/gateway/README.md`'s matching section
-for the full reasoning and what a real fix would need.
+**Follow-up-request propagation, fixed on the backend, 2026-09-11 — nothing changed here:** the
+query-string token alone never propagated to a module's own follow-up requests. Gateway now also sets
+the same token as a `Path=/modules/{id}/proxy`-scoped cookie on every successful proxied response, so
+this page's own `<iframe src=".../proxy/?token=...">` needs no change at all — the fix is entirely
+server-side. Still only provably correct end-to-end against `hello-module`'s self-contained stock nginx
+page (no follow-up requests of its own to prove the cookie against yet) — see `src/core/gateway/
+README.md`'s matching section for the full mechanism and its real third-party-cookie trade-off.
 
 **Confirmed live, 2026-09-10:** the iframe rendered `hello-module`'s real page inline against
 `homelab-dev`, after hitting (and fixing) the same mutable-`:dev`-tag stale-pod gotcha documented in
@@ -209,8 +212,9 @@ own docstrings point to).
 2026-09-11 — it had gone stale, still describing item 7's real Install/Remove action and item 8's
 module-proxy as future work well after both shipped and were live-verified; see the sections above).
 
-What's still genuinely open: the module-proxy's query-string-token limitation for a module with real
-frontend assets or its own backend calls (see that section above). The recurring mutable-`:dev`-
+What's still genuinely open: the module-proxy's follow-up-request cookie fix is **built, not yet
+live-verified against a real second module** (see that section above — `hello-module` alone can't prove
+it). The recurring mutable-`:dev`-
 image-tag stale-pod gotcha that bit this page's own branches three separate times this session is now
 **fixed and confirmed live, 2026-09-11** (`ci.yml`'s git-sha annotation bump — see `argocd/README.md`'s
 matching section and `docs/known-issues.md`'s entry for the live-verification writeup: `ui-shell`'s
