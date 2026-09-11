@@ -930,11 +930,30 @@ only ever appears after a timeout, never fires on its own: deleting the `Applica
 land the commit; if `modules-root` reconciles while the manifest file is still present in git, it
 would just recreate the `Application` gateway just deleted).
 
-**Confirmation still needed:** this section will get one more update once the button has actually
-been clicked against a real stuck row on `homelab-dev` and confirmed to leave `kubectl -n argocd get
-application <module-id>` 404ing and the Add-ons row resolving to "not installed" without the manual
-`kubectl delete` workaround — the same live-verification bar every other feature in this doc has
-cleared before being called done.
+**Confirmed live, 2026-09-11, against `homelab-dev`:** verified in two parts.
+
+First, the raw endpoint, directly — with `hello-module` installed and healthy (not stuck), a
+`curl -X POST .../modules/hello-module/force-cleanup` with an editor-role token returned `200`
+with `{"status": "deleted", ...}`, and `kubectl -n argocd get application hello-module` immediately
+came back `NotFound` — proving the broadened RBAC grant and the delete call itself work end to end
+against the real cluster, independent of ever actually reproducing a stuck uninstall.
+`kubectl -n hello-module get deployment,service,pvc` confirmed the `Deployment`/`Service` were torn
+down by the finalizer cascade while the `PersistentVolumeClaim` correctly survived, same as the
+original manual-`kubectl delete` workaround always produced. Reinstalled `hello-module` immediately
+after to restore it for further testing.
+
+Second, the actual UI path: reinstalled `hello-module`, clicked **Remove** on the Add-ons page, and
+this exact prune gap reproduced a third time — the row sat on "Removal queued…" past the 2-minute
+poll timeout, at which point the row's note and button correctly swapped to the new copy ("Still
+removing after a while…") and a red **Force cleanup** button, exactly as designed. Clicking it
+resolved the row to "not installed" on its own, with no manual `kubectl delete` step — the gap this
+entry documents is now something anyone with editor access can close from the browser, not something
+that requires cluster access and a terminal.
+
+Only remaining rough edge: the button's appearance still depends on this same prune gap actually
+reproducing within the 2-minute polling window (as it did, for the third time, during this same
+verification) — if `modules-root` prunes cleanly, `uninstall` just resolves on its own and there's
+nothing to force-clean, which is the correct behavior, not a bug in this feature.
 
 ### `ui-shell`'s mutable `:dev` image tag means "Synced/Healthy" doesn't prove the new build is actually running
 
