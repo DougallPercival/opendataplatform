@@ -1014,10 +1014,28 @@ promotion-model meaning (`ARCHITECTURE.md` §10) untouched but adds real new com
 Image Updater or equivalent, a new controller) for a problem a much smaller change already solves:
 the actual bug was never "which tag," it was "nothing forces a real rollout on every deploy."
 
-**Status:** built, not yet live-verified against `homelab-dev` — needs a real push through one of the
-three build-and-push jobs, confirming the annotation actually bumps in git, Argo CD actually syncs it,
-and the pod actually rolls, all without a manual `rollout restart` anywhere in the loop. Until that's
-confirmed, the manual-restart workaround above is still the fallback if a deploy ever looks stale.
+**Confirmed live, 2026-09-11:** `feature/git-sha-rollout` merged to `dev` as PR #55 (the manifests/docs
+changes) followed by PR #56 (`ci.yml` + `.github/scripts/set-git-sha-annotation.sh` — added separately
+after the remote file-write bridge refused to write anything under `.github/`, a deliberate safety
+guard, not a bug). Since `ci.yml` sits in every package's own `paths:` filter, PR #56's merge push
+tripped all three `build-and-push-*` jobs at once — the first real exercise of all three new steps
+simultaneously, exactly as anticipated when this was built. All three went green
+(`gh run view` on the run for merge commit `f0c7f1d`), and all three produced their own
+`chore(<service>): bump deployed git-sha annotation to f0c7f1d... [skip ci]` commit on `dev` — no
+partial failures, no infinite CI loop from `[skip ci]` plus the annotation-only diff staying outside
+`ci.yml`'s path filters, exactly as designed.
+
+`kubectl get deploy <svc> -n <svc> -o jsonpath='...platform\.io/git-sha...'` read
+`f0c7f1d3e9d1e4c6821333f9736e62c4f7acf49e` for gateway, ui-shell, and catalog-service alike, matching
+the PR #56 merge commit exactly. And the actual pods: `gateway-6f689fd9bc-xc48z`,
+`ui-shell-56675bb984-4hbv4`, `catalog-service-68c6dbdccb-xcc5x` all showed `RESTARTS: 0` with an `AGE`
+far younger than their Deployment objects (9d/8d/6d21h) — brand-new pod objects, not just a container
+restart — with nobody running `kubectl rollout restart` anywhere in the sequence. Argo CD's existing
+`selfHeal` picked up the annotation-only commit and rolled fresh pods on its own, exactly as designed.
+
+**Status:** fixed. The manual `rollout restart` above is no longer needed after a normal deploy —
+it stays documented here only as a fallback for the genuinely unrelated failure mode (a deploy that
+completes without a new commit at all, e.g. a manually re-triggered build).
 
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 
