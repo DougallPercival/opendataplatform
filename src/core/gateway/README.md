@@ -220,10 +220,20 @@ Chosen over HTML-rewriting the response body specifically because rewriting can'
 building its own URL at runtime, only markup. Real, known trade-off: this is technically a third-party
 cookie (the iframe's origin differs from ui-shell's top-level page origin), which Safari/Firefox block
 or partition by default and Chrome is moving toward blocking too — where that happens, behavior falls
-back to exactly the pre-fix gap, not worse. Only provably correct end-to-end against `hello-module`
-(a single self-contained static page); a module with a real multi-file frontend or its own backend
-calls is the real test this hasn't had yet. See `app/module_proxy.py`'s own module docstring and
-`docs/known-issues.md` for the full writeup.
+back to exactly the pre-fix gap, not worse.
+
+**Confirmed live, 2026-09-11**, against `homelab-dev`: `hello-module` still has no follow-up requests
+of its own to prove this against inside a real browser, so the mechanism itself was proven directly
+with `curl` standing in for "the module's own second request" — mint a token, hit
+`.../proxy/?token=...` and capture the response, then hit `.../proxy/` again with **no `?token=` at
+all**, only the cookie jar saved from the first request. First response: `200`, with
+`set-cookie: mp_token_hello-module=...; HttpOnly; Max-Age=182; Path=/modules/hello-module/proxy;
+SameSite=none; Secure` — every attribute `_set_proxy_cookie` asks for, present and correct. Second
+response, cookie-only, zero query param: `200`. That's the exact contract a module's own `fetch()`
+needs. Real remaining gap: no actual module with real frontend assets or backend calls of its own has
+exercised this from inside a browser yet — the server-side mechanism is proven, the third-party-cookie
+browser-blocking trade-off (above) is not, and won't be until one exists. See `app/module_proxy.py`'s
+own module docstring and `docs/known-issues.md` for the full writeup.
 
 **Confirmed live, 2026-09-10**, against `homelab-dev`: `curl` against the mint endpoint with a real
 editor-role token returned a JWT whose decoded claims matched exactly; `curl` against the proxy route
@@ -276,11 +286,11 @@ cleanup actions, real nav, and reverse-proxying into a module's own UI are all b
 page's buttons and item 8 as undone well after both shipped). See that plan doc's own closing note on
 item 8 for the full picture.
 
-What's still genuinely open: the module-proxy's follow-up-request cookie is **built, not yet
-live-verified against a real second module** (see the "Reverse-proxying into a module's own UI" section
-above — the mechanism is fixed and unit-tested, but only `hello-module`'s self-contained stock nginx
-page has ever actually been proxied through this route live; that page issues no follow-up requests, so
-it can't itself prove the cookie fix). The recurring mutable-`:dev`-image-tag stale-pod gotcha that used
+What's still genuinely open: the module-proxy's follow-up-request cookie mechanism is **confirmed live
+via `curl`, 2026-09-11** (see the "Reverse-proxying into a module's own UI" section above), but still
+not proven inside a real browser against a real module with its own frontend assets or backend calls —
+`hello-module` issues no follow-up requests of its own, so it can't close that last gap by itself. The
+recurring mutable-`:dev`-image-tag stale-pod gotcha that used
 to be listed here too is now **fixed and
 confirmed live, 2026-09-11** (`ci.yml`'s git-sha annotation bump — see `argocd/README.md`'s matching
 section and `docs/known-issues.md`'s entry for the live-verification writeup: all three services'
