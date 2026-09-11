@@ -831,8 +831,10 @@ PowerShell are all fine, this is a plain git plumbing command, not something OS-
 
 ```bash
 git update-index --chmod=+x bootstrap/install.sh bootstrap/join-node.sh \
-  bootstrap/keycloak-bootstrap-cli-client.sh bootstrap/snapshot-setup.sh \
-  bootstrap/teardown.sh bootstrap/verify.sh
+  bootstrap/keycloak-bootstrap-cli-client.sh bootstrap/keycloak-bootstrap-login-client.sh \
+  bootstrap/keycloak-bootstrap-ui-shell-client.sh bootstrap/seal-gateway-github-token.sh \
+  bootstrap/seal-gateway-module-proxy-secret.sh bootstrap/export-sealed-secrets-key.sh \
+  bootstrap/snapshot-setup.sh bootstrap/teardown.sh bootstrap/verify.sh
 git commit -m "Mark bootstrap scripts executable in git (Windows-side commits don't set the x-bit)"
 git push
 ```
@@ -841,6 +843,13 @@ This changes what mode git *itself* has recorded for these files, permanently �
 `git pull`/clone on any Linux box checks them out already executable, no more manual `chmod +x`
 after every pull. (`bootstrap/lib/common.sh` deliberately isn't in that list — it's `source`d, never
 executed directly, so it was never supposed to be executable.)
+
+**List corrected 2026-09-11** — it had gone stale, missing every bootstrap script added since the
+original 2026-09-01 writeup (`keycloak-bootstrap-login-client.sh`, `keycloak-bootstrap-ui-shell-
+client.sh`, both `seal-gateway-*.sh` scripts, and now `export-sealed-secrets-key.sh`). Worth
+re-running the command above even if you ran an earlier version of it before — `git update-index` is
+idempotent for files already marked executable, so re-running it with the full current list is
+always safe and just catches up whatever was missing.
 
 Going forward: any *new* script added under `bootstrap/` (or anywhere else meant to be run directly,
 e.g. `./script.sh` rather than `bash script.sh`) needs this same one-time `git update-index
