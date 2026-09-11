@@ -122,6 +122,47 @@ generates follows the same `targetRevision: dev` convention, but discovers its `
 `discover_repo_url` docstring for why generated content doesn't need the same "update by hand"
 caveat hand-authored files here do.
 
+## The `:dev` image tag and the git-sha rollout trick (2026-09-11)
+
+`catalog-service.yaml`/`gateway.yaml`/`ui-shell.yaml` all hardcode `image: ghcr.io/dougallpercival/
+<service>:dev` — a floating tag, deliberately, matching the dev → test → main promotion model
+`ci.yml`'s own header comment and `ARCHITECTURE.md` §10 describe (see each manifest's own "self-
+referencing apps" image comment). That choice has a real cost `docs/known-issues.md` documents at
+length: Argo CD reports `Synced`/`Healthy` the moment the *manifest text* matches git, which is
+true the instant `:dev` is merged, whether or not the *running pod* has actually repulled the new
+image — `imagePullPolicy: Always` only repulls on a real pod restart, and nothing about a floating
+tag's own text changes when the tag's target moves underneath it. This bit `gateway`/`ui-shell`
+directly, repeatedly, in one session (`docs/known-issues.md`), always requiring a manual
+`kubectl rollout restart` to actually prove out.
+
+**Fixed, not worked around:** `ci.yml`'s three `build-and-push*` jobs each gained a step
+(`.github/scripts/set-git-sha-annotation.sh`) that, after a successful push-triggered image build,
+patches that service's own manifest — a `platform.io/git-sha` annotation on the Deployment's *pod
+template* (`spec.template.metadata.annotations`, not just top-level `metadata`) — to the triggering
+commit's SHA, then commits and pushes that one-line change straight back to the branch that
+triggered the build. This is the exact same trick `kubectl rollout restart` uses under the hood (it
+patches a `kubectl.kubernetes.io/restartedAt` annotation in the same spot) — changing anything in
+the pod template forces Kubernetes to actually roll new pods, regardless of whether the image
+*reference* text changed. Argo CD's own automated `selfHeal` sync (already `true` on all three
+Applications) picks the resulting commit up like any other change, no different from a normal PR
+merge.
+
+Kept deliberately narrow: this doesn't touch the `:dev`/`:test`/`:main` promotion model, doesn't add
+digest-pinning, and doesn't need Argo CD Image Updater or any new controller — just one more small,
+CI-authored commit, following the exact precedent `module-lifecycle.yml` already set for a workflow
+pushing straight back to `dev` with `contents: write` on its own `GITHUB_TOKEN`. The commit only ever
+touches `manifests/*.yaml`, never anything under `ci.yml`'s own `paths:` filter, so it can't retrigger
+itself — confirmed by inspection of that filter, reinforced with `[skip ci]` as defense in depth. See
+`.github/scripts/set-git-sha-annotation.sh`'s own comment for why a plain, precise `sed` substitution
+was chosen over a full YAML-parsing tool (these files are heavily hand-commented and, in gateway's
+case, CRLF-terminated — a full parse/serialize round-trip risks exactly the kind of reformatting this
+repo has already been bitten by once, with the SealedSecret boundary-detection bug).
+
+**Status:** built 2026-09-11, not yet live-verified against `homelab-dev` — see
+`docs/known-issues.md`'s stale-pod entry for what confirming this live still needs (a real push,
+watching the annotation actually bump and a real rollout actually happen, ideally without a manual
+`rollout restart` anywhere in the loop).
+
 ## RBAC — gateway's Argo CD access (platform-module-deps branch, 2026-09-03; broadened feature/force-cleanup, 2026-09-10)
 
 `manifests/gateway.yaml` now includes this repo's first `ServiceAccount`/`Role`/`RoleBinding` —

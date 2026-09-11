@@ -998,14 +998,26 @@ pod served it. A changed image digest after the restart (`kubectl -n ui-shell ge
 jsonpath='{.items[0].status.containerStatuses[0].imageID}'`, or just diffing pod age before/after) is
 the real confirmation a new build is actually running — `Synced`/`Healthy` alone is not.
 
-**Status:** open, not fixed — this is a known trade-off of the `:dev`-tag/`imagePullPolicy: Always`
-convention every self-referencing app in this repo already uses (see `argocd/README.md`'s "Self-
-referencing apps" section), not a bug in any one branch. A real fix would mean per-commit image tags
-(or digest-pinning) plus Argo CD image-updater-style automation to bump the Deployment spec on every
-new build — a bigger, deliberate infrastructure change, not something to sneak in as a side effect of
-an unrelated feature branch. Until then: **after merging any `ui-shell` or gateway branch, always force
-a rollout restart and confirm the image digest changed — never trust `Synced`/`Healthy` alone as proof
-the new build is live.**
+**Built, 2026-09-11, dedicated branch (not a side effect of an unrelated feature branch — deliberate
+infrastructure work, as this entry originally said a real fix would need to be):** `ci.yml`'s three
+`build-and-push*` jobs (catalog-service, gateway, ui-shell) each gained a step that bumps a new
+`platform.io/git-sha` pod-template annotation to the triggering commit's SHA and pushes that straight
+back to the branch, after every successful push-triggered image build. Changing the pod template
+(not just the image reference, which is what `:dev` never does) is what actually forces Kubernetes to
+roll new pods — the exact mechanism `kubectl rollout restart` itself uses, just automatic and CI-
+authored instead of requiring the manual step this entry used to document as the only fix. Full
+writeup: `argocd/README.md`'s "The `:dev` image tag and the git-sha rollout trick" section and
+`.github/scripts/set-git-sha-annotation.sh`'s own comment for the exact mechanism.
+
+Deliberately NOT per-commit image tags or digest-pinning — that would still leave `:dev`'s own
+promotion-model meaning (`ARCHITECTURE.md` §10) untouched but adds real new complexity (Argo CD
+Image Updater or equivalent, a new controller) for a problem a much smaller change already solves:
+the actual bug was never "which tag," it was "nothing forces a real rollout on every deploy."
+
+**Status:** built, not yet live-verified against `homelab-dev` — needs a real push through one of the
+three build-and-push jobs, confirming the annotation actually bumps in git, Argo CD actually syncs it,
+and the pod actually rolls, all without a manual `rollout restart` anywhere in the loop. Until that's
+confirmed, the manual-restart workaround above is still the fallback if a deploy ever looks stale.
 
 ## Already fixed in the scripts — nothing to do, kept here as a changelog
 

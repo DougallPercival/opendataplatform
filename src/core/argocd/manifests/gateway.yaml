@@ -71,6 +71,15 @@ spec:
     metadata:
       labels:
         app: gateway
+      # Bumped to the real commit SHA by ci.yml's build-and-push-gateway job after every push-
+      # triggered image build (.github/scripts/set-git-sha-annotation.sh) — a placeholder until
+      # then. Closes docs/known-issues.md's stale-pod gotcha: this repo's `:dev` tag is a moving
+      # target, so Synced/Healthy alone never proves a new image is actually running. Changing
+      # THIS value changes the pod template, which is what actually makes Kubernetes roll new
+      # pods — exactly what `kubectl rollout restart` does by patching a similar annotation, just
+      # automatic and with a value you can compare against a commit instead of a bare timestamp.
+      annotations:
+        platform.io/git-sha: "unset"
     spec:
       serviceAccountName: gateway
       containers:

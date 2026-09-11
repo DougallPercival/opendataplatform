@@ -210,10 +210,12 @@ own docstrings point to).
 module-proxy as future work well after both shipped and were live-verified; see the sections above).
 
 What's still genuinely open: the module-proxy's query-string-token limitation for a module with real
-frontend assets or its own backend calls (see that section above), and the recurring mutable-`:dev`-
-image-tag stale-pod gotcha (`docs/known-issues.md`) that's bitten three separate branches this
-session. Broader gaps against ARCHITECTURE.md's longer-term vision aren't scoped in this doc — track
-those in `ARCHITECTURE.md`/`docs/known-issues.md` as they come up.
+frontend assets or its own backend calls (see that section above). The recurring mutable-`:dev`-
+image-tag stale-pod gotcha that bit this page's own branches three separate times this session is now
+**built, not yet live-verified** (`ci.yml`'s git-sha annotation bump — see `argocd/README.md`'s
+matching section and `docs/known-issues.md`'s entry). Broader gaps against ARCHITECTURE.md's
+longer-term vision aren't scoped in this doc — track those in `ARCHITECTURE.md`/`docs/known-issues.md`
+as they come up.
 
 ## Running it locally
 
