@@ -206,7 +206,7 @@ Most of this platform doesn't need backing up — it needs to be *reconstructibl
 | Catalog + workspace metadata | Postgres (catalog-lite schema) | CloudNativePG's built-in WAL archiving + base backups, continuously, to a dedicated SeaweedFS bucket — point-in-time recovery, not just nightly snapshots |
 | Keycloak realm (users, groups, workspaces) | Postgres (Keycloak schema) | Same CloudNativePG mechanism, same bucket |
 | The actual data lake | SeaweedFS | On-cluster: Longhorn/NFS replication protects against one disk or one node dying. Off-cluster: a scheduled `rclone sync` of critical buckets to an external drive or offsite location — on-cluster redundancy alone doesn't survive a fire, theft, or a bad `rm` |
-| Secrets encryption key (sealed-secrets private key, or Vault unseal keys) | Nowhere reproducible | The one thing that must be exported and stored *outside* the cluster the moment it's generated — lose this and every other backup is unreadable ciphertext |
+| Secrets encryption key (sealed-secrets private key, or Vault unseal keys) | Nowhere reproducible | `bootstrap/export-sealed-secrets-key.sh` (2026-09-11) — a systemd timer exporting every sealed-secrets key Secret (the controller rotates its own keypair every 30 days by default; old keys are kept, never deleted, so the export has to cover all of them, not just the active one), with optional `rclone` push to any cloud remote. The one thing that must be exported and stored *outside* the cluster the moment it's generated — lose this and every other backup is unreadable ciphertext |
 | k3s cluster datastore (SQLite by default; etcd if `--cluster-init`) | `node-a` | `bootstrap/snapshot-setup.sh` — a systemd timer running a SQLite online `.backup` (not k3s's built-in `etcd-snapshot`, which is etcd-only and doesn't apply to this repo's single-server SQLite datastore), with optional `rclone` push to any cloud remote |
 | Argo CD's own state | Git + a few in-cluster repo-credential secrets | Effectively already backed up — it's git. Only the repo credentials need to ride along with the secrets-key backup above |
 
@@ -319,7 +319,7 @@ Each phase is usable on its own — you're not blocked on finishing the whole th
 | 6 | Serving | The NFL/March Madness payoff — dashboards and model tracking | Streamlit, Superset, MLflow, shell polish |
 | 7 | Open-source prep | Someone else can stand this up | Docs, module template, one-command bootstrap, seeded demo dataset, `install.sh`/`teardown.sh` validated against a clean cloud environment (not just home hardware) |
 
-**Do this on day one, not later:** export the secrets-encryption key to offsite storage the moment it's generated in Phase 0. Every other piece of state in §8 can be restored from backups; that key can't be regenerated, and losing it makes every other backup unreadable ciphertext.
+**Do this on day one, not later:** export the secrets-encryption key to offsite storage the moment it's generated in Phase 0. Every other piece of state in §8 can be restored from backups; that key can't be regenerated, and losing it makes every other backup unreadable ciphertext. `bootstrap/export-sealed-secrets-key.sh` (§8's table, above) automates this, including catching future key rotations — still worth running it once by hand right after first install rather than waiting for its own timer's first scheduled fire, per its own name: day one, not later.
 
 ---
 
