@@ -64,6 +64,18 @@
 #     used as-is — every remote you've defined, not just the one you're
 #     about to use — so create a purpose-specific remote first if you'd
 #     rather this Secret not carry credentials for things unrelated to it.
+#
+#     Fixed 2026-09-12, live-verified against a real off-cluster SFTP destination: the source
+#     SeaweedFS S3 side is now defined as a named remote ("srcs3") entirely via RCLONE_CONFIG_*
+#     env vars on the mirror container below, not inlined into the `rclone sync` command's own
+#     connection-string syntax the way it originally was. The original inline form —
+#     ":s3,...,endpoint=http://host:8333:bucket" — broke in practice: that syntax uses ":" to
+#     separate the trailing path from the options, and the endpoint value's own "http://" and
+#     ":8333" collide with that delimiter, so rclone truncated the endpoint down to the literal
+#     string "http" and failed with "resolve endpoint: endpoint rule error, Custom endpoint
+#     `http` was not a valid URI" on every real attempt. Env-var-defined remotes have no such
+#     ambiguity — this is the same idea as the bucket-creation Job's own AWS_* env vars above,
+#     just rclone's equivalent of it.
 apiVersion: barmancloud.cnpg.io/v1
 kind: ObjectStore
 metadata:
@@ -199,17 +211,31 @@ spec:
                   mountPath: /offsite-config
                   readOnly: true
               env:
-                - name: SRC_ACCESS_KEY_ID
+                # Source SeaweedFS S3 side, defined as a named remote called "srcs3" purely via
+                # env vars — see the header comment's "Fixed 2026-09-12" note for why this isn't
+                # inlined into the sync command below as a connection string anymore.
+                - name: RCLONE_CONFIG_SRCS3_TYPE
+                  value: "s3"
+                - name: RCLONE_CONFIG_SRCS3_PROVIDER
+                  value: "Other"
+                - name: RCLONE_CONFIG_SRCS3_ENV_AUTH
+                  value: "false"
+                - name: RCLONE_CONFIG_SRCS3_ACCESS_KEY_ID
                   valueFrom:
                     secretKeyRef:
                       name: platform-s3-credentials
                       key: ACCESS_KEY_ID
-                - name: SRC_SECRET_ACCESS_KEY
+                - name: RCLONE_CONFIG_SRCS3_SECRET_ACCESS_KEY
                   valueFrom:
                     secretKeyRef:
                       name: platform-s3-credentials
                       key: ACCESS_SECRET_KEY
-                - name: S3_ENDPOINT
+                - name: RCLONE_CONFIG_SRCS3_REGION
+                  valueFrom:
+                    secretKeyRef:
+                      name: platform-s3-credentials
+                      key: REGION
+                - name: RCLONE_CONFIG_SRCS3_ENDPOINT
                   value: "http://storage-seaweedfs-s3.storage-seaweedfs.svc.cluster.local:8333"   # TODO: keep in sync with the ObjectStore's endpointURL above
                 - name: BUCKET
                   value: "platform-postgres-backups"
@@ -230,7 +256,7 @@ spec:
                   export RCLONE_CONFIG=/offsite-config/rclone.conf
                   echo "Mirroring s3://${BUCKET} (in-cluster SeaweedFS) -> ${DEST} ..."
                   rclone sync \
-                    ":s3,provider=Other,env_auth=false,access_key_id=${SRC_ACCESS_KEY_ID},secret_access_key=${SRC_SECRET_ACCESS_KEY},endpoint=${S3_ENDPOINT}:${BUCKET}" \
+                    "srcs3:${BUCKET}" \
                     "${DEST}" \
                     --create-empty-src-dirs=false
                   echo "Done."
